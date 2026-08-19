@@ -1,0 +1,57 @@
+SecondDisplay Host v0.1
+=================================================
+Available monitors:
+  [0] \\.\DISPLAY1  1920x1080 @ (0,0)  PRIMARY
+  [1] \\.\DISPLAY2  1000x504 @ (460,1080)
+  [2] \\.\DISPLAY5  3392x2400 @ (1920,-596)
+Capturing monitor [2] \\.\DISPLAY5
+DXGI capture: \\.\DISPLAY5 3392x2400 (GPU Desktop Duplication, cursor overlay)
+GPU VPP: BGRA 3392x2400->NV12 1920x1358, cursor substream ON (maxStreams=16)
+Server listening on 127.0.0.1:27315
+Run: adb reverse tcp:27315 tcp:27315
+Capturing: 3392x2400 @ 60 fps, HEVC 1920x1358 (GPU zero-copy)
+Adaptive fps: ON (client refresh, max 144; use --fps <n> to pin)
+Waiting for client... (press Ctrl+C to stop)
+Client: 3000x2120 @ 144Hz, 420dpi
+Client connected: 127.0.0.1:63615
+GPU VPP: BGRA 3392x2400->NV12 1920x1358, cursor substream ON (maxStreams=16)
+Adaptive fps -> 144
+HEVC encoder: (no name) (2 found)
+  capture 54,3 fps (#272) | encoded+sent 22,6 fps, 77 KB/s
+  capture 65,5 fps (#328) | encoded+sent 27,6 fps, 140 KB/s
+Client: 3000x2120 @ 144Hz, 420dpi
+Client connected: 127.0.0.1:63627
+  capture 66,8 fps (#335) | encoded+sent 26,7 fps, 305 KB/s
+  capture 66,2 fps (#332) | encoded+sent 26,3 fps, 265 KB/s
+  capture 67,6 fps (#339) | encoded+sent 25,3 fps, 260 KB/s
+  capture 65,0 fps (#325) | encoded+sent 25,8 fps, 257 KB/s
+  capture 65,4 fps (#328) | encoded+sent 26,7 fps, 265 KB/s
+  capture 65,6 fps (#329) | encoded+sent 25,5 fps, 260 KB/s
+Client disconnected
+Client disconnected
+No clients - encoder released
+Client: 3000x2120 @ 144Hz, 420dpi
+Client connected: 127.0.0.1:63653
+HEVC encoder: (no name) (2 found)
+  capture 18,0 fps (#171) | encoded+sent 7,2 fps, 62 KB/s
+Client: 3000x2120 @ 144Hz, 420dpi
+Client connected: 127.0.0.1:63658
+  capture 65,5 fps (#328) | encoded+sent 26,2 fps, 136 KB/s
+  capture 65,8 fps (#330) | encoded+sent 26,5 fps, 136 KB/s
+  capture 66,0 fps (#331) | encoded+sent 26,3 fps, 259 KB/s
+  capture 66,1 fps (#331) | encoded+sent 25,4 fps, 260 KB/s
+  capture 66,4 fps (#333) | encoded+sent 25,1 fps, 258 KB/s
+  capture 66,6 fps (#333) | encoded+sent 26,2 fps, 263 KB/s
+  capture 62,5 fps (#313) | encoded+sent 24,2 fps, 269 KB/s
+  capture 63,8 fps (#320) | encoded+sent 18,9 fps, 148 KB/s
+  capture 63,8 fps (#319) | encoded+sent 15,8 fps, 161 KB/s
+  capture 63,0 fps (#316) | encoded+sent 15,2 fps, 154 KB/s
+  capture 108,8 fps (#545) | encoded+sent 44,9 fps, 457 KB/s
+  capture 69,1 fps (#346) | encoded+sent 19,8 fps, 201 KB/s
+  capture 63,5 fps (#318) | encoded+sent 13,6 fps, 161 KB/s
+  capture 79,1 fps (#396) | encoded+sent 25,8 fps, 239 KB/s
+  capture 83,6 fps (#419) | encoded+sent 33,5 fps, 341 KB/s
+  capture 89,3 fps (#447) | encoded+sent 40,8 fps, 415 KB/s
+  capture 53,6 fps (#269) | encoded+sent 23,3 fps, 237 KB/s
+  capture 39,3 fps (#197) | encoded+sent 21,1 fps, 215 KB/s
+  capture 67,1 fps (#336) | encoded+sent 27,2 fps, 276 KB/s
