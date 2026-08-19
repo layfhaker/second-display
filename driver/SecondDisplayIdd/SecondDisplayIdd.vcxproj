@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1B2C3D4-1111-2222-3333-444455556666}</ProjectGuid>
+    <TargetVersion>Windows10</TargetVersion>
+    <DriverType>UMDF</DriverType>
+    <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
+    <UMDF_VERSION_MINOR>35</UMDF_VERSION_MINOR>
+    <UmdfVersion>2.35</UmdfVersion>
+    <RootNamespace>SecondDisplayIdd</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>WindowsUserModeDriver10.0</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <SignMode>Off</SignMode>
+    <_KitRoot>D:\Program Files\Windows Kits\10\</_KitRoot>
+    <_KitVer>10.0.28000.0</_KitVer>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>%(AdditionalOptions) /std:c++17</AdditionalOptions>
+      <PreprocessorDefinitions>IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=2;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(_KitRoot)Include\$(_KitVer)\um;$(_KitRoot)Include\$(_KitVer)\shared;$(_KitRoot)Include\$(_KitVer)\ucrt;$(_KitRoot)Include\$(_KitVer)\km;$(_KitRoot)Include\$(_KitVer)\um\iddcx\1.2;$(_KitRoot)Include\wdf\umdf\2.35;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>iddcxstub.lib;d3d11.lib;dxgi.lib;avrt.lib;ole32.lib;WdfDriverStubUm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(_KitRoot)Lib\$(_KitVer)\um\x64;$(_KitRoot)Lib\$(_KitVer)\ucrt\x64;$(_KitRoot)Lib\$(_KitVer)\um\x64\iddcx\1.2;$(_KitRoot)Lib\wdf\umdf\x64\2.35;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Driver.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Driver.h" />
+  </ItemGroup>
+  <!-- INF excluded from build for now; DLL-only -->
+  <!--<ItemGroup>
+    <Inf Include="SecondDisplayIdd.inf" />
+  </ItemGroup>-->
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
