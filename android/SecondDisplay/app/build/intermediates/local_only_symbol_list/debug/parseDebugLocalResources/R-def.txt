@@ -1,0 +1,6 @@
+R_DEF: Internal format may change without notice
+local
+string accessibility_service_description
+string app_name
+style Theme.SecondDisplay
+xml shortcut_accessibility_service

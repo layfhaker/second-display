@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Перехватывает Alt+Tab с клавиатуры планшета и отправляет его на Windows.</string>
+    <string name="app_name">SecondDisplay</string>
+    <style name="Theme.SecondDisplay" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>
