@@ -1,0 +1,92 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.example.seconddisplay"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+7-->INJECTED
+8        android:minSdkVersion="24"
+8-->INJECTED
+9        android:targetSdkVersion="36" />
+9-->INJECTED
+10
+11    <permission
+11-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:22:5-24:47
+12        android:name="com.example.seconddisplay.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+12-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:23:9-81
+13        android:protectionLevel="signature" />
+13-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:24:9-44
+14
+15    <uses-permission android:name="com.example.seconddisplay.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+15-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:26:5-97
+15-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:26:22-94
+16
+17    <application
+17-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:4:5-23:19
+18        android:allowBackup="true"
+18-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:5:9-35
+19        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+19-->[androidx.core:core:1.12.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\93f3ebffb38010a4c78bff956e1b2146\transformed\core-1.12.0\AndroidManifest.xml:28:18-86
+20        android:debuggable="true"
+21        android:extractNativeLibs="false"
+21-->INJECTED
+22        android:icon="@mipmap/ic_launcher"
+22-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:6:9-43
+23        android:label="@string/app_name"
+23-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:7:9-41
+24        android:roundIcon="@mipmap/ic_launcher_round"
+24-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:8:9-54
+25        android:supportsRtl="true"
+25-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:9:9-35
+26        android:testOnly="true"
+27        android:theme="@style/Theme.SecondDisplay" >
+27-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:10:9-51
+28        <activity
+28-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:11:9-22:20
+29            android:name="com.example.seconddisplay.FullscreenActivity"
+29-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:12:13-47
+30            android:configChanges="orientation|keyboardHidden|screenSize"
+30-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:13:13-74
+31            android:exported="true"
+31-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:14:13-36
+32            android:label="@string/app_name"
+32-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:15:13-45
+33            android:theme="@style/Theme.SecondDisplay.Fullscreen" >
+33-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:16:13-66
+34            <intent-filter>
+34-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:17:13-21:29
+35                <action android:name="android.intent.action.MAIN" />
+35-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:18:17-69
+35-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:18:25-66
+36
+37                <category android:name="android.intent.category.LAUNCHER" />
+37-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:20:17-77
+37-->C:\Users\admin\Documents\second display\android\SecondDisplay\seconddisplay\src\main\AndroidManifest.xml:20:27-74
+38            </intent-filter>
+39        </activity>
+40
+41        <provider
+41-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:24:9-32:20
+42            android:name="androidx.startup.InitializationProvider"
+42-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:25:13-67
+43            android:authorities="com.example.seconddisplay.androidx-startup"
+43-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:26:13-68
+44            android:exported="false" >
+44-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:27:13-37
+45            <meta-data
+45-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:29:13-31:52
+46                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+46-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:30:17-75
+47                android:value="androidx.startup" />
+47-->[androidx.emoji2:emoji2:1.2.0] C:\Users\admin\.gradle\caches\9.4.1\transforms\5ce3b3d5ee65f56f22fabf806758fa30\transformed\jetified-emoji2-1.2.0\AndroidManifest.xml:31:17-49
+48            <meta-data
+48-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\admin\.gradle\caches\9.4.1\transforms\b4ec568f36e779e2c88d0d774b4ce4cb\transformed\jetified-lifecycle-process-2.4.1\AndroidManifest.xml:31:13-33:52
+49                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+49-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\admin\.gradle\caches\9.4.1\transforms\b4ec568f36e779e2c88d0d774b4ce4cb\transformed\jetified-lifecycle-process-2.4.1\AndroidManifest.xml:32:17-78
+50                android:value="androidx.startup" />
+50-->[androidx.lifecycle:lifecycle-process:2.4.1] C:\Users\admin\.gradle\caches\9.4.1\transforms\b4ec568f36e779e2c88d0d774b4ce4cb\transformed\jetified-lifecycle-process-2.4.1\AndroidManifest.xml:33:17-49
+51        </provider>
+52    </application>
+53
+54</manifest>

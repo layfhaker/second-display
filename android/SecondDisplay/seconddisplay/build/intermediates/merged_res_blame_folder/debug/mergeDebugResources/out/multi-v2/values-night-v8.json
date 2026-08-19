@@ -1,0 +1,45 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.example.seconddisplay-mergeDebugResources-18:/values-night-v8/values-night-v8.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\admin\\.gradle\\caches\\9.4.1\\transforms\\acd1a9d7f1ef3b203c47e8a01f2cf1b7\\transformed\\appcompat-1.6.1\\res\\values-night-v8\\values-night-v8.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,125,209,293,389,491,593,687",
+                        "endColumns": "69,83,83,95,101,101,93,88",
+                        "endOffsets": "120,204,288,384,486,588,682,771"
+                    },
+                    "to": {
+                        "startLines": "2,3,4,5,6,7,8,16",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,125,209,293,389,491,593,980",
+                        "endColumns": "69,83,83,95,101,101,93,88",
+                        "endOffsets": "120,204,288,384,486,588,682,1064"
+                    }
+                },
+                {
+                    "source": "C:\\Users\\admin\\Documents\\second display\\android\\SecondDisplay\\seconddisplay\\src\\main\\res\\values-night\\themes.xml",
+                    "from": {
+                        "startLines": "2,10",
+                        "startColumns": "4,4",
+                        "startOffsets": "100,458",
+                        "endLines": "8,13",
+                        "endColumns": "12,12",
+                        "endOffsets": "452,689"
+                    },
+                    "to": {
+                        "startLines": "9,17",
+                        "startColumns": "4,4",
+                        "startOffsets": "687,1069",
+                        "endLines": "15,20",
+                        "endColumns": "12,12",
+                        "endOffsets": "975,1300"
+                    }
+                }
+            ]
+        }
+    ]
+}

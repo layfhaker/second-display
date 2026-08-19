@@ -1,0 +1,33 @@
+R_DEF: Internal format may change without notice
+local
+attr? fullscreenBackgroundColor
+attr? fullscreenTextColor
+color black
+color black_overlay
+color light_blue_600
+color light_blue_900
+color light_blue_A200
+color light_blue_A400
+color purple_200
+color purple_500
+color purple_700
+color teal_200
+color teal_700
+color white
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+id dummy_button
+id fullscreen_content
+id fullscreen_content_controls
+layout activity_fullscreen
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
+string dummy_button
+string dummy_content
+style ThemeOverlay.SecondDisplay.FullscreenContainer
+style Theme.SecondDisplay
+style Theme.SecondDisplay.Fullscreen
+style Widget.Theme.SecondDisplay.ActionBar.Fullscreen
+style Widget.Theme.SecondDisplay.ButtonBar.Fullscreen
+styleable FullscreenAttrs fullscreenBackgroundColor fullscreenTextColor
