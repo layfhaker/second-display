@@ -4,6 +4,24 @@
 (туннель ADB). Рабочий стол **расширяется** на планшет, тач работает как мышь. Видео —
 аппаратный **HEVC** (Intel QuickSync) → аппаратный декод на планшете.
 
+## English Summary
+
+SecondDisplay turns an Android tablet into a USB second monitor for Windows 11. The host
+uses a virtual display, DXGI Desktop Duplication, hardware HEVC encoding (Intel QuickSync),
+and an ADB reverse tunnel to stream frames to the Android client, where MediaCodec decodes
+them directly to a Surface.
+
+### Key Features
+
+- Extend the Windows desktop to an Android tablet, or mirror the main display.
+- Hardware HEVC encode/decode for a low-latency video path.
+- Touch input is sent back to Windows and injected as mouse input.
+- Automatic `--auto` mode detects the tablet, enables the virtual display, and starts the stream.
+- Windows host in C#/.NET 8 and Android client in Kotlin.
+
+Download the latest Android client from [GitHub Releases](https://github.com/layfhaker/second-display/releases/latest).
+The current artifact is a debug APK intended for testing.
+
 ```
 ┌──────────────────────── Windows PC ─────────────────────────┐      ┌──── Android планшет ────┐
 │  вирт.дисплей (MttVDD) ─► [Host C#] ─ HEVC(AnnexB)/TCP ─►     │ USB  │  [Client Kotlin]         │
