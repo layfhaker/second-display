@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "dgSpecHash": "p90cyVyVMKo=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\admin\\Documents\\second display\\host\\SecondDisplay.Host\\SecondDisplay.Host.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\microsoft.win32.systemevents\\8.0.0\\microsoft.win32.systemevents.8.0.0.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\sharpgen.runtime\\2.1.2-beta\\sharpgen.runtime.2.1.2-beta.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\sharpgen.runtime.com\\2.1.2-beta\\sharpgen.runtime.com.2.1.2-beta.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\system.drawing.common\\8.0.12\\system.drawing.common.8.0.12.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\vortice.direct3d11\\3.5.0\\vortice.direct3d11.3.5.0.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\vortice.directx\\3.5.0\\vortice.directx.3.5.0.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\vortice.dxgi\\3.5.0\\vortice.dxgi.3.5.0.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\vortice.mathematics\\1.7.8\\vortice.mathematics.1.7.8.nupkg.sha512",
+    "C:\\Users\\admin\\_devhome\\nuget\\packages\\vortice.mediafoundation\\3.5.0\\vortice.mediafoundation.3.5.0.nupkg.sha512"
+  ],
+  "logs": []
+}

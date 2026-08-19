@@ -1,0 +1,56 @@
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.exe
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Microsoft.Win32.SystemEvents.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SharpGen.Runtime.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SharpGen.Runtime.COM.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\System.Drawing.Common.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.Direct3D11.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.DirectX.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.DXGI.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.Mathematics.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.MediaFoundation.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\bin\Debug\net8.0-windows\runtimes\win\lib\net8.0\Microsoft.Win32.SystemEvents.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.csproj.AssemblyReference.cache
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.AssemblyInfoInputs.cache
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.AssemblyInfo.cs
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.csproj.CoreCompileInputs.cache
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDi.5C25A0EC.Up2Date
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\refint\SecondDisplay.Host.dll
+C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8be17ff488873813\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.pdb
+C:\Users\admin\Documents\second display\tmp-build\host\SecondDisplay.Host.exe
+C:\Users\admin\Documents\second display\tmp-build\host\SecondDisplay.Host.deps.json
+C:\Users\admin\Documents\second display\tmp-build\host\SecondDisplay.Host.runtimeconfig.json
+C:\Users\admin\Documents\second display\tmp-build\host\SecondDisplay.Host.dll
+C:\Users\admin\Documents\second display\tmp-build\host\SecondDisplay.Host.pdb
+C:\Users\admin\Documents\second display\.build\host-debug\SecondDisplay.Host.exe
+C:\Users\admin\Documents\second display\.build\host-debug\SecondDisplay.Host.deps.json
+C:\Users\admin\Documents\second display\.build\host-debug\SecondDisplay.Host.runtimeconfig.json
+C:\Users\admin\Documents\second display\.build\host-debug\SecondDisplay.Host.dll
+C:\Users\admin\Documents\second display\.build\host-debug\SecondDisplay.Host.pdb
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.exe
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.deps.json
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.runtimeconfig.json
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SecondDisplay.Host.pdb
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Microsoft.Win32.SystemEvents.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SharpGen.Runtime.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\SharpGen.Runtime.COM.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\System.Drawing.Common.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.Direct3D11.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.DirectX.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.DXGI.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.Mathematics.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\Vortice.MediaFoundation.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\bin\Debug\net8.0-windows\runtimes\win\lib\net8.0\Microsoft.Win32.SystemEvents.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.csproj.AssemblyReference.cache
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.AssemblyInfoInputs.cache
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.AssemblyInfo.cs
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.csproj.CoreCompileInputs.cache
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDi.5C25A0EC.Up2Date
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\refint\SecondDisplay.Host.dll
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.pdb
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\SecondDisplay.Host.genruntimeconfig.cache
+C:\Users\admin\Documents\second display\host\SecondDisplay.Host\obj\Debug\net8.0-windows\ref\SecondDisplay.Host.dll
