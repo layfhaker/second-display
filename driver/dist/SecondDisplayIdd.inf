@@ -1,0 +1,64 @@
+; SecondDisplayIdd.inf — Indirect Display Driver (IddCx, UMDF)
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = SecondDisplayIdd.cat
+PnpLockdown = 1
+DriverVer = 06/24/2026,1.0.0.0
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...17134
+
+[Standard.NTamd64.10.0...17134]
+%DeviceName% = SecondDisplay_Install, Root\SecondDisplayIdd
+
+[SourceDisksFiles]
+SecondDisplayIdd.dll = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[DestinationDirs]
+DefaultDestDir = 13 ; package directory
+
+; ================= Install section =================
+[SecondDisplay_Install]
+CopyFiles = UMDriverCopy
+
+[SecondDisplay_Install.hw]
+
+[SecondDisplay_Install.Services]
+AddService = WUDFRd, 0x000001fa, WUDFRD_ServiceInstall
+
+[WUDFRD_ServiceInstall]
+DisplayName   = %WudfRdDisplayName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\WUDFRd.sys
+
+[SecondDisplay_Install.Wdf]
+UmdfService              = SecondDisplayIdd, SecondDisplay_Install_UMDF
+UmdfServiceOrder         = SecondDisplayIdd
+UmdfExtensions            = IddCx0102
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+UmdfFileObjectPolicy     = AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy   = CannotUseFsContexts
+
+[SecondDisplay_Install_UMDF]
+UmdfLibraryVersion = 2.35.0
+ServiceBinary      = %13%\SecondDisplayIdd.dll
+
+
+[UMDriverCopy]
+SecondDisplayIdd.dll
+
+[Strings]
+ManufacturerName  = "SecondDisplay"
+DiskName          = "SecondDisplay Install Disk"
+DeviceName        = "SecondDisplay Virtual Display"
+WudfRdDisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"
+
