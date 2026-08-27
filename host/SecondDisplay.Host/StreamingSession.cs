@@ -190,7 +190,7 @@ public sealed class StreamingSession : IDisposable
 
                 // Watchdog: recreate the encoder if its async MFT faulted or stopped emitting output
                 // (>2.5s with no encoded frame while we keep feeding it). Keeps the stream self-healing.
-                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 5000)))
+                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 2500)))
                 {
                     Console.WriteLine($"Encoder unhealthy (faulted={encoder.Faulted}, idle={frameStart - lastOutputMs}ms) — recreating");
                     encoder.Dispose(); encoder = null;

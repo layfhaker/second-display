@@ -41,6 +41,10 @@ public sealed class Orchestrator
             catch (Exception ex) { Console.WriteLine($"[orchestrator] Startup VDD.Disable failed (not admin?): {ex.Message}"); }
 
             _adb.StartServer();
+            // Force a clean adb server state at startup: a stale server started at boot with
+            // a different HOME / without ADB_VENDOR_KEYS keeps the tablet "unauthorized" forever.
+            // A fresh server re-reads the keys and the tablet comes up as "device" on its own.
+            _adb.RestartServer("startup");
             Console.WriteLine("[orchestrator] Passive — waiting for tablet...");
 
             while (!ct.IsCancellationRequested)
@@ -161,13 +165,6 @@ public sealed class Orchestrator
                 {
                     Console.WriteLine($"[orchestrator] VDD took primary — giving it back to {origPrimary.Device}");
                     DisplayConfig.SetPrimary(origPrimary.Device);
-                    var others = ScreenCapture.GetMonitors().Where(m => m.Device != monitor.Device).ToList();
-                    if (others.Count > 0)
-                    {
-                        int right = others.Max(m => m.X + m.Width);
-                        DisplayConfig.MoveTo(monitor.Device, right, 0);
-                    }
-                    Thread.Sleep(500); // let the desktop settle after the topology shuffle
                 }
             }
 
@@ -177,6 +174,25 @@ public sealed class Orchestrator
                 var refreshed = ScreenCapture.GetMonitors().FirstOrDefault(m => m.Device == monitor.Device);
                 if (refreshed.Device != null)
                     monitor = refreshed;
+            }
+
+            // Always park the VDD to the right of the primary display. Windows can place it
+            // at negative coordinates (e.g. y=-116) or overlapping other monitors, which causes
+            // DWM to skip compositing → DXGI captures black frames → black screen on tablet.
+            // Unconditional positioning avoids relying on Windows' often-unpredictable auto-layout.
+            {
+                var primary = ScreenCapture.GetMonitors().FirstOrDefault(m => m.Primary);
+                int targetX = primary.Device != null ? primary.X + primary.Width : 0;
+                var current = ScreenCapture.GetMonitors().FirstOrDefault(m => m.Device == monitor.Device);
+                if (current.Device != null && (current.X != targetX || current.Y != 0))
+                {
+                    Console.WriteLine($"[orchestrator] Moving VDD from ({current.X},{current.Y}) to ({targetX},0)");
+                    DisplayConfig.MoveTo(monitor.Device, targetX, 0);
+                    Thread.Sleep(500);
+                    var repositioned = ScreenCapture.GetMonitors().FirstOrDefault(m => m.Device == monitor.Device);
+                    if (repositioned.Device != null)
+                        monitor = repositioned;
+                }
             }
 
             try

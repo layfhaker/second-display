@@ -107,6 +107,28 @@ public sealed class AdbController
         }
     }
 
+    /// <summary>
+    /// Fully restarts the adb server so it re-reads the device keys from disk.
+    /// A stale adb server started earlier (e.g. at boot with a different HOME / no
+    /// ADB_VENDOR_KEYS) can keep presenting a key the tablet does not recognize, so
+    /// devices stay "unauthorized" forever no matter how many times the cable is
+    /// re-plugged. kill-server + start-server fixes that by forcing a fresh key load.
+    /// </summary>
+    public void RestartServer(string reason)
+    {
+        try
+        {
+            Console.WriteLine($"[adb] Restarting adb server ({reason})...");
+            RunAdb("kill-server");
+            RunAdb("start-server");
+            Console.WriteLine("[adb] adb server restarted.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[adb] RestartServer failed: {ex.Message}");
+        }
+    }
+
     public IReadOnlyList<string> ListDevices()
     {
         try
@@ -118,6 +140,7 @@ public sealed class AdbController
             var devices = new List<string>();
             var lines = stdout.Split('\n');
             bool inDeviceList = false;
+            bool sawUnauthorized = false;
 
             foreach (var line in lines)
             {
@@ -145,8 +168,18 @@ public sealed class AdbController
                 else if (status == "unauthorized" || status == "offline" || status == "no permissions")
                 {
                     Console.WriteLine($"[adb] device {serial} status={status}, skipping");
+                    if (status == "unauthorized")
+                        sawUnauthorized = true;
                 }
             }
+
+            // A tablet stuck in "unauthorized" usually means the adb server is using a stale
+            // key (started at boot with a different HOME / no ADB_VENDOR_KEYS). Force a fresh
+            // server restart so it re-reads the correct keys — the device should then come up
+            // as "device" without any manual adb kill-server. Debounced so we don't restart
+            // the server on every 1.5s poll (that would drop an active session).
+            if (sawUnauthorized && !HasAuthorizedDevice(devices))
+                MaybeRestartForUnauthorized();
 
             return devices.OrderBy(x => x).ToList();
         }
@@ -155,6 +188,25 @@ public sealed class AdbController
             Console.WriteLine($"[adb] ListDevices failed: {ex.Message}");
             return new List<string>();
         }
+    }
+
+    private bool HasAuthorizedDevice(IReadOnlyList<string> devices)
+    {
+        // Devices list already contains only "device"-status serials.
+        return devices.Count > 0;
+    }
+
+    private DateTime _lastUnauthorizedRestart = DateTime.MinValue;
+    private static readonly TimeSpan UnauthorizedRestartMinInterval = TimeSpan.FromSeconds(30);
+
+    private void MaybeRestartForUnauthorized()
+    {
+        DateTime now = DateTime.Now;
+        if (now - _lastUnauthorizedRestart < UnauthorizedRestartMinInterval)
+            return; // already tried recently — give the tablet time to show the dialog
+
+        _lastUnauthorizedRestart = now;
+        RestartServer("device unauthorized");
     }
 
     public bool HasApp(string serial)

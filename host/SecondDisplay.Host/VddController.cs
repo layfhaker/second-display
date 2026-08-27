@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace SecondDisplay.Host;
@@ -87,6 +87,10 @@ public sealed class VddController
 
     public void Disable()
     {
+        // Remove phantom monitors from display topology BEFORE disabling the driver,
+        // otherwise Disable-PnpDevice leaves the phantom visible to EnumDisplayDevices.
+        RemoveVddMonitors();
+
         string command = $"$d = Get-PnpDevice -FriendlyName '{_friendlyName}' -ErrorAction SilentlyContinue; if ($d) {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false; 'OK' }} else {{ 'NOTFOUND' }}";
 
         try
@@ -192,6 +196,15 @@ public sealed class VddController
                 // Check timeout
                 if ((DateTime.Now.Ticks - startTicks) > timeoutTicks)
                 {
+                    // VDD phantom from a previous session may already be present —
+                    // the driver re-creates it after Disable on some systems.  Detect
+                    // it by matching the PnP vendor ID (MTT1337) via EnumDisplayDevices.
+                    var fallback = FindVddMonitor(current);
+                    if (fallback != null)
+                    {
+                        Console.WriteLine($"[vdd] VDD phantom already present: {fallback.Value.Device} {fallback.Value.Width}x{fallback.Value.Height} — reusing");
+                        return fallback;
+                    }
                     Console.WriteLine("[vdd] WaitForMonitor timeout");
                     return null;
                 }
@@ -204,5 +217,86 @@ public sealed class VddController
                 return null;
             }
         }
+    }
+
+    /// <summary>
+    /// Actively remove any VDD-originated monitors from the display topology.
+    /// Disable-PnpDevice does NOT clean up the phantom — Windows keeps it in display
+    /// settings until we explicitly detach it via ChangeDisplaySettingsEx(DETOACH).
+    /// </summary>
+    private void RemoveVddMonitors()
+    {
+        try
+        {
+            var vddNames = new List<string>();
+            var dd = new NativeMethods.DISPLAY_DEVICE { cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>() };
+            for (int i = 0; NativeMethods.EnumDisplayDevices(null, i, ref dd, 0); i++)
+            {
+                var monDd = new NativeMethods.DISPLAY_DEVICE { cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>() };
+                if (NativeMethods.EnumDisplayDevices(dd.DeviceName, 0, ref monDd, 0))
+                {
+                    if (monDd.DeviceID.Contains("MTT", StringComparison.OrdinalIgnoreCase))
+                        vddNames.Add(dd.DeviceName);
+                }
+                dd.cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>();
+            }
+            if (vddNames.Count == 0) return;
+
+            foreach (string devName in vddNames)
+            {
+                Console.WriteLine($"[vdd] Removing phantom monitor: {devName}");
+                NativeMethods.ChangeDisplaySettingsEx(devName, IntPtr.Zero, IntPtr.Zero, 0x08 /*DETACH*/, IntPtr.Zero);
+            }
+            Thread.Sleep(500);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[vdd] RemoveVddMonitors failed (non-fatal): {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Find the VDD monitor (MTT1337 PnP vendor) among the current monitors.
+    /// Returns null if no VDD output is present.
+    /// </summary>
+    private static ScreenCapture.MonitorInfo? FindVddMonitor(IReadOnlyList<ScreenCapture.MonitorInfo> monitors)
+    {
+        try
+        {
+            var displayToPath = new Dictionary<string, string>();
+            var dd = new NativeMethods.DISPLAY_DEVICE { cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>() };
+            for (int i = 0; NativeMethods.EnumDisplayDevices(null, i, ref dd, 0); i++)
+            {
+                var monDd = new NativeMethods.DISPLAY_DEVICE { cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>() };
+                if (NativeMethods.EnumDisplayDevices(dd.DeviceName, 0, ref monDd, 0))
+                    displayToPath[dd.DeviceName] = monDd.DeviceID;
+                dd.cb = Marshal.SizeOf<NativeMethods.DISPLAY_DEVICE>();
+            }
+
+            return monitors.FirstOrDefault(m =>
+                displayToPath.TryGetValue(m.Device, out var path) &&
+                path.Contains("MTT", StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return null; }
+    }
+
+    private static class NativeMethods
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DISPLAY_DEVICE
+        {
+            public int cb;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+            public int StateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern bool EnumDisplayDevices(string? lpDevice, int iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, int dwFlags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int ChangeDisplaySettingsEx(string lpszDeviceName, IntPtr lpDevMode, IntPtr hWnd, uint dwFlags, IntPtr lParam);
     }
 }

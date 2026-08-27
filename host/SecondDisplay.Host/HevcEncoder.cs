@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using SharpGen.Runtime;
 using Vortice.Direct3D11;
 using Vortice.MediaFoundation;
+using System.Diagnostics;
 
 namespace SecondDisplay.Host;
 
@@ -197,6 +198,10 @@ public sealed class HevcEncoder : IDisposable
         }
     }
 
+    // COM error codes for MF_E_NO_EVENTS_AVAILABLE and MF_E_TRANSFORM_TYPE_NOT_SET.
+    const int MF_E_NO_EVENTS_AVAILABLE = unchecked((int)0xC00D6E5A);
+    const int MF_E_TRANSFORM_TYPE_NOT_SET = unchecked((int)0xC00D6D6C);
+
     void EventLoop()
     {
         while (_running)
@@ -229,11 +234,17 @@ public sealed class HevcEncoder : IDisposable
                     DrainOutput();
                 }
             }
+            catch (COMException ex) when (ex.ErrorCode == MF_E_NO_EVENTS_AVAILABLE)
+            {
+                // MFT has no events right now — normal when idle. Back off briefly
+                // instead of busy-spinning (which burns a full CPU core for no reason).
+                Thread.Sleep(1);
+            }
             catch (Exception ex)
             {
                 // Hardware MFT can fault (mode change, GPU TDR, etc.). Don't die silently —
                 // flag it so the main loop recreates the encoder, then exit this thread.
-                Console.WriteLine($"Encoder event loop fault: {ex.Message} — flagging for restart");
+                Console.WriteLine($"Encoder event loop fault: {ex.Message} (0x{ex.HResult:X8}) — flagging for restart");
                 Faulted = true;
                 return;
             }
@@ -290,7 +301,13 @@ public sealed class HevcEncoder : IDisposable
         if (!_providesSamples)
             odb.Sample.AddBuffer(MediaFactory.MFCreateMemoryBuffer(_width * _height * 2));
 
+        var sw = Stopwatch.StartNew();
         var res = _transform.ProcessOutput(ProcessOutputFlags.None, 1, ref odb, out _);
+        // Guard against a hung hardware encoder: ProcessOutput should never take >500 ms.
+        if (sw.ElapsedMilliseconds > 500)
+            Console.WriteLine($"DrainOutput: ProcessOutput took {sw.ElapsedMilliseconds}ms — encoder may be stalling");
+        sw.Stop();
+
         if (res.Code == MF_E_TRANSFORM_NEED_MORE_INPUT)
             return;
         res.CheckError();
