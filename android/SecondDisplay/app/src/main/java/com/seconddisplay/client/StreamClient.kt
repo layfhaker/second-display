@@ -4,6 +4,7 @@ import android.util.Log
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -38,8 +39,6 @@ class StreamClient(
 
     private companion object {
         private const val TAG = "StreamClient"
-        /** If the server sends nothing for this long, consider the link stalled. */
-        private const val READ_TIMEOUT_MS = 5000
     }
 
     fun start(screenWidth: Int, screenHeight: Int, density: Int, refreshRate: Int) {
@@ -73,10 +72,14 @@ class StreamClient(
     private fun connect(screenWidth: Int, screenHeight: Int, density: Int, refreshRate: Int) {
         val sock = Socket()
         sock.tcpNoDelay = true
-        // Read timeout: a silent server (stalled adb/USB link) no longer blocks forever;
-        // we drop out to onDisconnect() and the activity reconnects.
         sock.connect(InetSocketAddress(host, port), 5000)
-        sock.soTimeout = READ_TIMEOUT_MS
+        // Read timeout protects against a *fully dead* link (never self-heals), but it must
+        // NOT fire on a brief encoder hiccup — otherwise the client enters an endless
+        // reconnect loop whenever the host encoder stalls for a second (observed: 9
+        // reconnects in 2 min when enc-lat spiked to 2.6s). 20s gives the encoder/host
+        // watchdog time to recover and the stream to resume, while still dropping a truly
+        // dead connection.
+        sock.soTimeout = 20_000
         socket = sock
         val input = sock.getInputStream()
         val output = sock.getOutputStream().buffered()
@@ -93,11 +96,18 @@ class StreamClient(
         Thread { outboundSendLoop(output) }.start()
 
         while (running.get()) {
-            val (pktType, pktPayload) = Protocol.readPacket(input)
-            if (pktType == PacketType.VIDEO) {
-                onFrame(Protocol.parseVideoFrame(pktPayload))
-            } else if (pktType == PacketType.CURSOR) {
-                onCursor(Protocol.parseCursor(pktPayload))
+            try {
+                val (pktType, pktPayload) = Protocol.readPacket(input)
+                if (pktType == PacketType.VIDEO) {
+                    onFrame(Protocol.parseVideoFrame(pktPayload))
+                } else if (pktType == PacketType.CURSOR) {
+                    onCursor(Protocol.parseCursor(pktPayload))
+                }
+            } catch (e: SocketTimeoutException) {
+                // A short encoder stall is not a disconnect. Only a *persistent* silence
+                // (20s read timeout) breaks out; the loop will reconnect via onDisconnect.
+                Log.w(TAG, "Read timeout (20s) — link may be dead, reconnecting")
+                break
             }
         }
     }
