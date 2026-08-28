@@ -11,6 +11,10 @@ class CursorOverlayView(context: Context) : View(context) {
     private var aspectW = 0
     private var aspectH = 0
     private var cursorBitmap: Bitmap? = null
+    private var cursorBitmapW = 0
+    private var cursorBitmapH = 0
+    private var cursorShapeVersion = 0
+    private var cursorShapeGen = 0
     private var cursorVisible = false
     private var cursorX = 0
     private var cursorY = 0
@@ -37,10 +41,21 @@ class CursorOverlayView(context: Context) : View(context) {
         cursorW = packet.width
         cursorH = packet.height
         if (packet.bgra.isNotEmpty() && packet.width > 0 && packet.height > 0) {
-            cursorBitmap?.recycle()
-            cursorBitmap = bgraToBitmap(packet.bgra, packet.width, packet.height)
+            // Cache the bitmap and only rebuild it when the cursor shape actually changes.
+            // Building a Bitmap on the UI thread for every cursor update is what caused
+            // the UI to stall (the freeze): createBitmap + full-canvas redraw every frame.
+            if (cursorBitmap == null || cursorW != cursorBitmapW || cursorH != cursorBitmapH ||
+                cursorShapeVersion != cursorShapeGen
+            ) {
+                cursorBitmap?.recycle()
+                cursorBitmap = bgraToBitmap(packet.bgra, packet.width, packet.height)
+                cursorBitmapW = cursorW
+                cursorBitmapH = cursorH
+                cursorShapeVersion++
+            }
         }
-        invalidate()
+        // postInvalidateOnAnimation: redraw on the next vsync, not synchronously.
+        postInvalidateOnAnimation()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {

@@ -62,6 +62,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startClient() {
+        // Stop any previous client before creating a new one — otherwise the old socket
+        // thread keeps running and we leak connections on every reconnect.
+        val previous = client
+        if (previous != null) {
+            previous.stop()
+            KeyForwarder.detach(previous)
+            client = null
+        }
+
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
         windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -84,9 +93,17 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { cursorView?.updateCursor(cursor) }
             },
             onDisconnect = {
-                runOnUiThread { teardownCodec() }
-                Thread.sleep(2000)
-                runOnUiThread { startClient() }
+                // Do NOT chain startClient() from the network thread: that created a
+                // reconnect storm that kept tearing down/recreating the SurfaceView and
+                // codec on the UI thread, which is what the UI freeze was. Instead, signal
+                // the main thread to schedule a clean reconnect.
+                teardownCodec()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) {
+                        // Small delay so the network stack settles, then restart cleanly.
+                        root.postDelayed({ startClient() }, 2000)
+                    }
+                }
             }
         )
         KeyForwarder.attach(client!!)

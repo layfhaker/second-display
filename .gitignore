@@ -1,0 +1,13 @@
+# Build artifacts
+**/bin/
+**/obj/
+**/build/
+**/.gradle/
+*.user
+*.suo
+
+# Local
+local.properties
+.vs/
+.idea/
+*.apk

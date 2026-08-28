@@ -197,6 +197,9 @@ public sealed class Orchestrator
 
             try
             {
+                // TCP transport runs through the adb reverse loopback tunnel (127.0.0.1:27315
+                // on the tablet -> host). This is the stable path; RNDIS USB-Ethernet is an
+                // optional future transport where adb reverse would be omitted.
                 _adb.SetupReverse(serial);
             }
             catch (Exception ex)
@@ -356,6 +359,7 @@ public sealed class Orchestrator
         session?.Dispose();
         sessionCts?.Dispose();
 
+        // Clean up the adb reverse tunnel (TCP transport over adb).
         try { _adb.RemoveReverse(serial); }
         catch (Exception ex) { Console.WriteLine($"[orchestrator] RemoveReverse failed: {ex.Message}"); }
 

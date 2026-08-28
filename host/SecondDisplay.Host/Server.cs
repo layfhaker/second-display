@@ -11,21 +11,162 @@ public sealed class Server : IDisposable
     private readonly List<ClientSession> _clients = new();
     private readonly object _clientsLock = new();
 
+    // UDP transport (primary): video/touch go over UDP to avoid TCP backpressure on the
+    // adb/USB link, which was the root cause of the "freezes". Fragmented via UdpPacketizer.
+    private UdpClient? _udp;
+    private readonly object _udpLock = new();
+    private IPEndPoint? _udpClientEp; // remote endpoint of the current UDP client
+    private bool _udpHasClient;
+    private readonly ConcurrentQueue<TouchPacket> _udpTouchQueue = new();
+    private readonly ConcurrentQueue<KeyPacket> _udpKeyQueue = new();
+    private readonly object _udpCursorLock = new();
+    private CursorState? _udpLatestCursor;
+    private long _udpCursorSeq;
+    private readonly BlockingCollection<VideoPacket> _udpSendQueue = new(2);
+    private int _udpCaptureWidth;
+    private int _udpCaptureHeight;
+    private int _udpRefreshRate;
+    private CancellationTokenSource _udpCts = new();
+
     public int Port { get; }
 
     public Server(int port = 27315)
     {
         Port = port;
-        _listener = new TcpListener(IPAddress.Loopback, port);
+        // Listen on all interfaces, not just loopback: video/touch now travel over the
+        // RNDIS USB-Ethernet link (tablet 10.87.87.73 <-> PC 10.87.87.182), NOT through
+        // the adb reverse loopback tunnel. Binding to 0.0.0.0 lets the tablet connect to
+        // the PC's RNDIS IP directly; legacy adb reverse (127.0.0.1) still works too.
+        _listener = new TcpListener(IPAddress.Any, port);
     }
 
     public void Start(int captureWidth, int captureHeight)
     {
         _listener.Start();
-        Console.WriteLine($"Server listening on 127.0.0.1:{Port}");
-        Console.WriteLine("Run: adb reverse tcp:27315 tcp:27315");
+        Console.WriteLine($"Server listening on 0.0.0.0:{Port} (TCP; UDP via RNDIS optional)");
 
         Task.Run(() => AcceptLoop(captureWidth, captureHeight));
+    }
+
+    /// <summary>Handles incoming UDP datagrams from the tablet (HELLO / TOUCH / KEY).</summary>
+    private void UdpReceiveLoop(CancellationToken ct)
+    {
+        var udp = _udp;
+        if (udp == null) return;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                IPEndPoint remote = new(IPAddress.Any, 0);
+                byte[] datagram;
+                try { datagram = udp.Receive(ref remote); }
+                catch (SocketException) { continue; }
+                catch (ObjectDisposedException) { break; }
+
+                if (datagram.Length < UdpPacketizer.HeaderSize) continue;
+
+                byte type = datagram[0];
+                // A single non-fragmented HELLO/TOUCH/KEY datagram: type in [1..2] / [0x20..0x22]
+                if (type == PacketType.Hello)
+                {
+                    var hello = Protocol.ParseHello(datagram.AsSpan(UdpPacketizer.HeaderSize));
+                    lock (_udpLock)
+                    {
+                        _udpClientEp = remote;
+                        _udpHasClient = true;
+                        _udpRefreshRate = (int)hello.RefreshRate;
+                        _udpCursorSeq = 0;
+                    }
+                    Console.WriteLine($"UDP client HELLO from {remote}: {hello.Width}x{hello.Height} @ {hello.RefreshRate}Hz");
+
+                    // Send READY (fragmented as a normal packet).
+                    var readyPayload = BuildReadyPayload((uint)_udpCaptureWidth, (uint)_udpCaptureHeight, hello.RefreshRate);
+                    foreach (var chunk in UdpPacketizer.Fragment(readyPayload, PacketType.Ready, 0, false))
+                        udp.Send(chunk, chunk.Length, remote);
+                }
+                else if (type == PacketType.Touch)
+                {
+                    if (datagram.Length < UdpPacketizer.HeaderSize + 10) continue;
+                    var touch = Protocol.ParseTouch(datagram.AsSpan(UdpPacketizer.HeaderSize, 10));
+                    _udpTouchQueue.Enqueue(touch);
+                }
+                else if (type == PacketType.Key)
+                {
+                    int keyLen = datagram.Length - UdpPacketizer.HeaderSize;
+                    if (keyLen < 7) continue;
+                    var key = Protocol.ParseKey(datagram.AsSpan(UdpPacketizer.HeaderSize, keyLen));
+                    _udpKeyQueue.Enqueue(key);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"UDP receive loop error: {ex.Message}");
+        }
+    }
+
+    /// <summary>Sends queued video frames + latest cursor to the UDP client, fragmented.</summary>
+    private void UdpSendLoop(CancellationToken ct)
+    {
+        var udp = _udp;
+        if (udp == null) return;
+        try
+        {
+            long sentCursorSeq = -1;
+            foreach (var frame in _udpSendQueue.GetConsumingEnumerable(ct))
+            {
+                IPEndPoint? ep;
+                lock (_udpLock) { ep = _udpClientEp; }
+                if (ep == null) continue;
+
+                CursorState? cursor = null;
+                long cursorSeq;
+                lock (_udpCursorLock)
+                {
+                    cursorSeq = _udpCursorSeq;
+                    if (cursorSeq != sentCursorSeq)
+                        cursor = _udpLatestCursor;
+                }
+
+                if (cursor != null)
+                {
+                    var c = cursor.Value;
+                    var curPayload = BuildCursorPayload(c.Visible, c.X, c.Y, c.W, c.H, c.Bgra);
+                    foreach (var chunk in UdpPacketizer.Fragment(curPayload, PacketType.Cursor, 0, false))
+                        udp.Send(chunk, chunk.Length, ep);
+                    sentCursorSeq = cursorSeq;
+                }
+
+                foreach (var chunk in UdpPacketizer.Fragment(frame.Data, PacketType.Video, frame.PtsMicros, frame.Keyframe))
+                    udp.Send(chunk, chunk.Length, ep);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"UDP send loop error: {ex.Message}");
+        }
+    }
+
+    private static byte[] BuildReadyPayload(uint w, uint h, uint refresh)
+    {
+        var buf = new byte[13];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(0, 4), w);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(4, 4), h);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(8, 4), refresh);
+        buf[12] = Codec.H265;
+        return buf;
+    }
+
+    private static byte[] BuildCursorPayload(bool visible, int x, int y, int w, int h, byte[] bgra)
+    {
+        var buf = new byte[17 + bgra.Length];
+        buf[0] = visible ? (byte)1 : (byte)0;
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(1, 4), x);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(5, 4), y);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(9, 4), w);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(13, 4), h);
+        Buffer.BlockCopy(bgra, 0, buf, 17, bgra.Length);
+        return buf;
     }
 
     private async Task AcceptLoop(int captureWidth, int captureHeight)
@@ -57,6 +198,19 @@ public sealed class Server : IDisposable
 
     public void BroadcastFrame(long ptsMicros, byte[] jpegData, bool keyframe)
     {
+        // UDP client (primary): enqueue — UDP send loop sends it, dropping on overflow.
+        bool hasUdp;
+        lock (_udpLock) hasUdp = _udpHasClient;
+        if (hasUdp)
+        {
+            var frame = VideoPacket.Video(ptsMicros, keyframe, jpegData);
+            if (!_udpSendQueue.TryAdd(frame, 0))
+            {
+                _udpSendQueue.TryTake(out _, 0);
+                _udpSendQueue.TryAdd(frame, 0);
+            }
+        }
+
         lock (_clientsLock)
         {
             for (int i = _clients.Count - 1; i >= 0; i--)
@@ -77,6 +231,17 @@ public sealed class Server : IDisposable
 
     public void BroadcastCursor(bool visible, int x, int y, int w, int h, byte[]? bgra)
     {
+        bool hasUdp;
+        lock (_udpLock) hasUdp = _udpHasClient;
+        if (hasUdp)
+        {
+            lock (_udpCursorLock)
+            {
+                _udpLatestCursor = new CursorState(visible, x, y, w, h, bgra ?? Array.Empty<byte>());
+                _udpCursorSeq++;
+            }
+        }
+
         lock (_clientsLock)
         {
             for (int i = _clients.Count - 1; i >= 0; i--)
@@ -97,6 +262,9 @@ public sealed class Server : IDisposable
 
     public TouchPacket? PollTouch()
     {
+        if (_udpTouchQueue.TryDequeue(out var udpTouch))
+            return udpTouch;
+
         lock (_clientsLock)
         {
             foreach (var client in _clients)
@@ -110,6 +278,9 @@ public sealed class Server : IDisposable
 
     public KeyPacket? PollKey()
     {
+        if (_udpKeyQueue.TryDequeue(out var udpKey))
+            return udpKey;
+
         lock (_clientsLock)
         {
             foreach (var client in _clients)
@@ -123,18 +294,34 @@ public sealed class Server : IDisposable
 
     public bool HasClients
     {
-        get { lock (_clientsLock) return _clients.Count > 0; }
+        get
+        {
+            bool hasUdp;
+            lock (_udpLock) hasUdp = _udpHasClient;
+            if (hasUdp) return true;
+            lock (_clientsLock) return _clients.Count > 0;
+        }
     }
 
     public int ClientCount
     {
-        get { lock (_clientsLock) return _clients.Count; }
+        get
+        {
+            bool hasUdp;
+            lock (_udpLock) hasUdp = _udpHasClient;
+            if (hasUdp) return 1;
+            lock (_clientsLock) return _clients.Count;
+        }
     }
 
     public int PreferredRefreshRate
     {
         get
         {
+            bool hasUdp;
+            lock (_udpLock) hasUdp = _udpHasClient;
+            if (hasUdp)
+                return _udpRefreshRate;
             lock (_clientsLock)
             {
                 int refresh = 0;
@@ -148,6 +335,15 @@ public sealed class Server : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
+        _udpCts.Cancel();
+        _udpSendQueue.CompleteAdding();
+        _udp?.Dispose();
+        _udp = null;
+        lock (_udpLock)
+        {
+            _udpHasClient = false;
+            _udpClientEp = null;
+        }
         _listener.Stop();
         lock (_clientsLock)
         {
@@ -302,12 +498,14 @@ internal sealed class ClientSession : IDisposable
         _stream.Dispose();
         _tcp.Dispose();
     }
-
-    private readonly record struct VideoPacket(long PtsMicros, bool Keyframe, byte[] Data)
-    {
-        public static VideoPacket Video(long ptsMicros, bool keyframe, byte[] data) =>
-            new(ptsMicros, keyframe, data);
-    }
-
-    private readonly record struct CursorState(bool Visible, int X, int Y, int W, int H, byte[] Bgra);
 }
+
+/// <summary>A queued video frame (TCP send queue).</summary>
+internal readonly record struct VideoPacket(long PtsMicros, bool Keyframe, byte[] Data)
+{
+    public static VideoPacket Video(long ptsMicros, bool keyframe, byte[] data) =>
+        new(ptsMicros, keyframe, data);
+}
+
+/// <summary>Latest cursor state (shared by TCP and UDP paths).</summary>
+internal readonly record struct CursorState(bool Visible, int X, int Y, int W, int H, byte[] Bgra);
