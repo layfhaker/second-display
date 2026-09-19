@@ -162,6 +162,25 @@ szOut1Ptr  db "    pOutput1=", 0
 szModeHr   db "    GetDisplayModeList1 hr=", 0
 szNumModes db "    mode count=", 0
 
+szVpQi     db "VPP: QI(ID3D11VideoDevice) hr=", 0
+szVpCtx    db "VPP: QI(ID3D11VideoContext) hr=", 0
+szVpEnum   db "VPP: CreateVideoProcessorEnumerator hr=", 0
+szVpProc   db "VPP: CreateVideoProcessor hr=", 0
+szVpNv12   db "VPP: NV12 CreateTexture2D hr=", 0
+szVpOView  db "VPP: CreateVideoProcessorOutputView hr=", 0
+szVpIView  db "VPP: CreateVideoProcessorInputView hr=", 0
+szVpBlt    db "VPP: VideoProcessorBlt hr=", 0
+szVpStg    db "VPP: NV12 staging CreateTexture2D hr=", 0
+szVpMap    db "VPP: NV12 Map hr=", 0
+szVpOk     db "VPP: BGRA->NV12 blt ok", 13, 10, 0
+szYSum     db "VPP: Y checksum=", 0
+szUvSum    db "VPP: UV checksum=", 0
+
+; IID_ID3D11VideoDevice {10ec4d5b-975a-4689-b9e4-d0aac30fe333}
+iidVideoDevice  db 5Bh,4Dh,0ECh,10h,5Ah,97h,89h,46h,0B9h,0E4h,0D0h,0AAh,0C3h,0Fh,0E3h,33h
+; IID_ID3D11VideoContext {61f21c45-3c0e-4a74-9cea-671039e0b0d7}
+iidVideoContext db 45h,1Ch,0F2h,61h,0Eh,3Ch,74h,4Ah,9Ch,0EAh,67h,10h,0Dh,9Ah,0D5h,0E4h
+
 ; IID_ID3D11Device {db6f6ddb-ac77-4e88-8253-819df9bbf140} — first three fields little-endian
 iidD3D11Device db 0DBh,6Dh,6Fh,0DBh,77h,0ACh,88h,4Eh,82h,53h,81h,9Dh,0F9h,0BBh,0F1h,40h
 
@@ -216,6 +235,23 @@ pDevAdapter dq ?               ; IDXGIAdapter* behind pDevice
 pProbe11    dq ?               ; ID3D11Device* QI'd from pDevice (identity check)
 devLevel  dd ?                 ; D3D_FEATURE_LEVEL the device was created at
 numModes  dd ?                 ; DXGI mode count reported by GetDisplayModeList1
+
+pVideoDevice dq ?              ; ID3D11VideoDevice*
+pVideoContext dq ?             ; ID3D11VideoContext*
+pVpEnum   dq ?                 ; ID3D11VideoProcessorEnumerator*
+pVpProc   dq ?                 ; ID3D11VideoProcessor*
+pVpInView dq ?                 ; ID3D11VideoProcessorInputView* (the desktop frame)
+pNv12Tex  dq ?                 ; ID3D11Texture2D* NV12 (blt target)
+pNv12View dq ?                 ; ID3D11VideoProcessorOutputView* for pNv12Tex
+pNv12Stg  dq ?                 ; ID3D11Texture2D* NV12 staging (CPU readable)
+vpContent db 48 dup(?)         ; D3D11_VIDEO_PROCESSOR_CONTENT_DESC
+vpInDesc  db 16 dup(?)         ; D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC
+vpOutDesc db 16 dup(?)         ; D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC
+vpStream  db 72 dup(?)         ; D3D11_VIDEO_PROCESSOR_STREAM
+vpInSpace dd ?                 ; D3D11_VIDEO_PROCESSOR_COLOR_SPACE (input)
+vpOutSpace dd ?                ; D3D11_VIDEO_PROCESSOR_COLOR_SPACE (output)
+ySum      dd ?
+uvSum     dd ?
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
 pDup      dq ?                 ; IDXGIOutputDuplication*
@@ -838,9 +874,16 @@ run_capture_probe proc
     mov     qword ptr [pRes], 0
     mov     qword ptr [pTex], 0
     mov     qword ptr [pStaging], 0
+    mov     qword ptr [pVideoDevice], 0
+    mov     qword ptr [pVideoContext], 0
+    mov     qword ptr [pVpEnum], 0
+    mov     qword ptr [pVpProc], 0
+    mov     qword ptr [pVpInView], 0
+    mov     qword ptr [pNv12Tex], 0
+    mov     qword ptr [pNv12View], 0
+    mov     qword ptr [pNv12Stg], 0
 
-    ; DXGI/D3D11 need no COM apartment of ours, and the working Rust path does not initialise one
-    ; either — DuplicateOutput fails with E_NOINTERFACE when this thread sits in an MTA.
+    ; DXGI/D3D11 need no COM apartment of ours (the working Rust path initialises none either).
 
     ; ---- factory ----
     lea     rcx, iidFactory1
@@ -1160,6 +1203,255 @@ cap_sum_done:
     mov     rdx, pStaging
     xor     r8d, r8d
     call    qword ptr [rax+120]
+
+    ; ================= D3D11 VideoProcessor: BGRA -> NV12 =================
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, iidVideoDevice
+    lea     r8, pVideoDevice
+    call    qword ptr [rax+0]              ; QI(ID3D11VideoDevice)
+    test    eax, eax
+    jnz     vp_qi_fail
+
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    lea     rdx, iidVideoContext
+    lea     r8, pVideoContext
+    call    qword ptr [rax+0]              ; QI(ID3D11VideoContext)
+    test    eax, eax
+    jnz     vp_ctx_fail
+
+    ; content desc: progressive, 30 fps, capW x capH both ways, OPTIMAL_SPEED
+    lea     r10, vpContent
+    mov     qword ptr [r10], 0
+    mov     qword ptr [r10+8], 0
+    mov     qword ptr [r10+16], 0
+    mov     qword ptr [r10+24], 0
+    mov     qword ptr [r10+32], 0
+    mov     dword ptr [r10+4], 30          ; InputFrameRate.Numerator
+    mov     dword ptr [r10+8], 1           ; InputFrameRate.Denominator
+    mov     eax, capW
+    mov     dword ptr [r10+12], eax        ; InputWidth
+    mov     eax, capH
+    mov     dword ptr [r10+16], eax        ; InputHeight
+    mov     dword ptr [r10+20], 30         ; OutputFrameRate.Numerator
+    mov     dword ptr [r10+24], 1          ; OutputFrameRate.Denominator
+    mov     eax, capW
+    mov     dword ptr [r10+28], eax        ; OutputWidth
+    mov     eax, capH
+    mov     dword ptr [r10+32], eax        ; OutputHeight
+    mov     dword ptr [r10+36], 1          ; D3D11_VIDEO_USAGE_OPTIMAL_SPEED
+
+    mov     rcx, pVideoDevice
+    mov     rax, [rcx]
+    lea     rdx, vpContent
+    lea     r8, pVpEnum
+    call    qword ptr [rax+80]             ; CreateVideoProcessorEnumerator
+    test    eax, eax
+    jnz     vp_enum_fail
+
+    mov     rcx, pVideoDevice
+    mov     rax, [rcx]
+    mov     rdx, pVpEnum
+    xor     r8d, r8d
+    lea     r9, pVpProc
+    call    qword ptr [rax+32]             ; CreateVideoProcessor
+    test    eax, eax
+    jnz     vp_proc_fail
+
+    mov     dword ptr [vpInSpace], 0       ; full-range RGB in
+    mov     dword ptr [vpOutSpace], 2      ; nominal range out
+    mov     rcx, pVideoContext
+    mov     rax, [rcx]
+    mov     rdx, pVpProc
+    xor     r8d, r8d
+    lea     r9, vpInSpace
+    call    qword ptr [rax+224]            ; VideoProcessorSetStreamColorSpace
+    mov     rcx, pVideoContext
+    mov     rax, [rcx]
+    mov     rdx, pVpProc
+    lea     r8, vpOutSpace
+    call    qword ptr [rax+120]            ; VideoProcessorSetOutputColorSpace
+    mov     rcx, pVideoContext
+    mov     rax, [rcx]
+    mov     rdx, pVpProc
+    xor     r8d, r8d
+    xor     r9d, r9d
+    call    qword ptr [rax+216]            ; SetStreamFrameFormat(PROGRESSIVE = 0)
+
+    ; NV12 render-target texture
+    lea     r10, texDesc
+    mov     eax, capW
+    mov     dword ptr [r10], eax
+    mov     eax, capH
+    mov     dword ptr [r10+4], eax
+    mov     dword ptr [r10+8], 1           ; MipLevels
+    mov     dword ptr [r10+12], 1          ; ArraySize
+    mov     dword ptr [r10+16], 103        ; DXGI_FORMAT_NV12
+    mov     dword ptr [r10+20], 1          ; SampleDesc.Count
+    mov     dword ptr [r10+24], 0          ; SampleDesc.Quality
+    mov     dword ptr [r10+28], 0          ; D3D11_USAGE_DEFAULT
+    mov     dword ptr [r10+32], 20h        ; D3D11_BIND_RENDER_TARGET
+    mov     dword ptr [r10+36], 0          ; CPUAccessFlags
+    mov     dword ptr [r10+40], 0          ; MiscFlags
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, texDesc
+    xor     r8d, r8d
+    lea     r9, pNv12Tex
+    call    qword ptr [rax+40]             ; CreateTexture2D
+    test    eax, eax
+    jnz     vp_nv12_fail
+
+    lea     r10, vpOutDesc
+    mov     qword ptr [r10], 0
+    mov     qword ptr [r10+8], 0
+    mov     dword ptr [r10+0], 1           ; D3D11_VPOV_DIMENSION_TEXTURE2D
+    mov     dword ptr [r10+4], 0           ; MipSlice
+    mov     rcx, pVideoDevice
+    mov     rax, [rcx]
+    mov     rdx, pNv12Tex
+    mov     r8, pVpEnum
+    lea     r9, vpOutDesc
+    lea     r10, pNv12View
+    mov     qword ptr [rsp+20h], r10
+    call    qword ptr [rax+72]             ; CreateVideoProcessorOutputView
+    test    eax, eax
+    jnz     vp_oview_fail
+
+    lea     r10, vpInDesc
+    mov     qword ptr [r10], 0
+    mov     qword ptr [r10+8], 0
+    mov     dword ptr [r10+0], 0           ; FourCC
+    mov     dword ptr [r10+4], 1           ; D3D11_VPIV_DIMENSION_TEXTURE2D
+    mov     rcx, pVideoDevice
+    mov     rax, [rcx]
+    mov     rdx, pTex
+    mov     r8, pVpEnum
+    lea     r9, vpInDesc
+    lea     r10, pVpInView
+    mov     qword ptr [rsp+20h], r10
+    call    qword ptr [rax+64]             ; CreateVideoProcessorInputView
+    test    eax, eax
+    jnz     vp_iview_fail
+
+    lea     r10, vpStream
+    mov     qword ptr [r10], 0
+    mov     qword ptr [r10+8], 0
+    mov     qword ptr [r10+16], 0
+    mov     qword ptr [r10+24], 0
+    mov     qword ptr [r10+32], 0
+    mov     qword ptr [r10+40], 0
+    mov     qword ptr [r10+48], 0
+    mov     qword ptr [r10+56], 0
+    mov     qword ptr [r10+64], 0
+    mov     dword ptr [r10+0], 1           ; Enable
+    mov     rax, pVpInView
+    mov     qword ptr [r10+32], rax        ; pInputSurface
+
+    mov     rcx, pVideoContext
+    mov     rax, [rcx]
+    mov     rdx, pVpProc
+    mov     r8, pNv12View
+    xor     r9d, r9d                       ; OutputFrame
+    mov     qword ptr [rsp+20h], 1         ; NumStreams
+    lea     r10, vpStream
+    mov     qword ptr [rsp+28h], r10       ; pStreams
+    call    qword ptr [rax+424]            ; VideoProcessorBlt
+    test    eax, eax
+    jnz     vp_blt_fail
+    lea     rcx, szVpOk
+    call    emit_z
+
+    ; ---- read the NV12 result back through a staging texture ----
+    lea     r10, texDesc
+    mov     eax, capW
+    mov     dword ptr [r10], eax
+    mov     eax, capH
+    mov     dword ptr [r10+4], eax
+    mov     dword ptr [r10+8], 1
+    mov     dword ptr [r10+12], 1
+    mov     dword ptr [r10+16], 103        ; DXGI_FORMAT_NV12
+    mov     dword ptr [r10+20], 1
+    mov     dword ptr [r10+24], 0
+    mov     dword ptr [r10+28], 3          ; D3D11_USAGE_STAGING
+    mov     dword ptr [r10+32], 0
+    mov     dword ptr [r10+36], 20000h     ; D3D11_CPU_ACCESS_READ
+    mov     dword ptr [r10+40], 0
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, texDesc
+    xor     r8d, r8d
+    lea     r9, pNv12Stg
+    call    qword ptr [rax+40]             ; CreateTexture2D
+    test    eax, eax
+    jnz     vp_stg_fail
+
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pNv12Stg
+    mov     r8, pNv12Tex
+    call    qword ptr [rax+376]            ; CopyResource
+
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pNv12Stg
+    xor     r8d, r8d
+    mov     r9d, 1
+    mov     dword ptr [rsp+20h], 0
+    lea     r10, mapped
+    mov     qword ptr [rsp+28h], r10
+    call    qword ptr [rax+112]            ; Map
+    test    eax, eax
+    jnz     vp_map_fail
+
+    mov     r11, qword ptr [mapped]        ; pData
+    mov     r10d, dword ptr [mapped+8]     ; RowPitch
+    mov     eax, r10d
+    imul    eax, dword ptr [capH]
+    mov     r12d, eax                      ; luma plane bytes
+    xor     edx, edx
+    xor     eax, eax
+vp_ysum:
+    cmp     eax, r12d
+    jae     vp_ysum_done
+    movzx   r8d, byte ptr [r11+rax]
+    add     edx, r8d
+    inc     eax
+    jmp     vp_ysum
+vp_ysum_done:
+    mov     ySum, edx
+
+    mov     r9, r11
+    add     r9, r12                        ; chroma plane follows luma
+    mov     eax, dword ptr [capH]
+    shr     eax, 1
+    imul    eax, r10d
+    mov     r13d, eax                      ; chroma plane bytes
+    xor     edx, edx
+    xor     eax, eax
+vp_uvsum:
+    cmp     eax, r13d
+    jae     vp_uvsum_done
+    movzx   r8d, byte ptr [r9+rax]
+    add     edx, r8d
+    inc     eax
+    jmp     vp_uvsum
+vp_uvsum_done:
+    mov     uvSum, edx
+
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pNv12Stg
+    xor     r8d, r8d
+    call    qword ptr [rax+120]            ; Unmap
+
+    lea     rcx, szYSum
+    mov     edx, ySum
+    call    emit_num
+    lea     rcx, szUvSum
+    mov     edx, uvSum
+    call    emit_num
     jmp     cap_cleanup
 
 cp_out_next:
@@ -1206,6 +1498,57 @@ cap_acq_fail:
     mov     edx, eax
     lea     rcx, szAcqFail
     call    emit_num
+    jmp     cap_cleanup
+
+vp_qi_fail:
+    mov     edx, eax
+    lea     rcx, szVpQi
+    call    emit_num
+    jmp     cap_cleanup
+vp_ctx_fail:
+    mov     edx, eax
+    lea     rcx, szVpCtx
+    call    emit_num
+    jmp     cap_cleanup
+vp_enum_fail:
+    mov     edx, eax
+    lea     rcx, szVpEnum
+    call    emit_num
+    jmp     cap_cleanup
+vp_proc_fail:
+    mov     edx, eax
+    lea     rcx, szVpProc
+    call    emit_num
+    jmp     cap_cleanup
+vp_nv12_fail:
+    mov     edx, eax
+    lea     rcx, szVpNv12
+    call    emit_num
+    jmp     cap_cleanup
+vp_oview_fail:
+    mov     edx, eax
+    lea     rcx, szVpOView
+    call    emit_num
+    jmp     cap_cleanup
+vp_iview_fail:
+    mov     edx, eax
+    lea     rcx, szVpIView
+    call    emit_num
+    jmp     cap_cleanup
+vp_blt_fail:
+    mov     edx, eax
+    lea     rcx, szVpBlt
+    call    emit_num
+    jmp     cap_cleanup
+vp_stg_fail:
+    mov     edx, eax
+    lea     rcx, szVpStg
+    call    emit_num
+    jmp     cap_cleanup
+vp_map_fail:
+    mov     edx, eax
+    lea     rcx, szVpMap
+    call    emit_num
 
 cap_cleanup:
     mov     rcx, pRes
@@ -1217,6 +1560,30 @@ cap_cleanup:
     mov     rcx, pStaging
     call    rel_if
     mov     qword ptr [pStaging], 0
+    mov     rcx, pNv12Stg
+    call    rel_if
+    mov     qword ptr [pNv12Stg], 0
+    mov     rcx, pNv12View
+    call    rel_if
+    mov     qword ptr [pNv12View], 0
+    mov     rcx, pNv12Tex
+    call    rel_if
+    mov     qword ptr [pNv12Tex], 0
+    mov     rcx, pVpInView
+    call    rel_if
+    mov     qword ptr [pVpInView], 0
+    mov     rcx, pVpProc
+    call    rel_if
+    mov     qword ptr [pVpProc], 0
+    mov     rcx, pVpEnum
+    call    rel_if
+    mov     qword ptr [pVpEnum], 0
+    mov     rcx, pVideoContext
+    call    rel_if
+    mov     qword ptr [pVideoContext], 0
+    mov     rcx, pVideoDevice
+    call    rel_if
+    mov     qword ptr [pVideoDevice], 0
     mov     rcx, pDup
     test    rcx, rcx
     jz      cap_no_dup
