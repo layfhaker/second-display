@@ -79,6 +79,15 @@ EXTERN CoUninitialize:PROC
 EXTERN CreateDXGIFactory1:PROC
 EXTERN D3D11CreateDevice:PROC
 
+; ---- Media Foundation imports (mfplat) ----
+EXTERN MFStartup:PROC
+EXTERN MFShutdown:PROC
+EXTERN MFTEnumEx:PROC
+EXTERN MFCreateMediaType:PROC
+EXTERN MFCreateSample:PROC
+EXTERN MFCreateMemoryBuffer:PROC
+EXTERN CoTaskMemFree:PROC
+
 .data
 szLocal   db "LOCALAPPDATA", 0
 szSub     db "\SecondDisplay", 0
@@ -181,6 +190,37 @@ iidVideoDevice  db 5Bh,4Dh,0ECh,10h,5Ah,97h,89h,46h,0B9h,0E4h,0D0h,0AAh,0C3h,0Fh
 ; IID_ID3D11VideoContext {61f21c45-3c0e-4a74-9cea-671039e0b0d7}
 iidVideoContext db 45h,1Ch,0F2h,61h,0Eh,3Ch,74h,4Ah,9Ch,0EAh,67h,10h,0Dh,9Ah,0D5h,0E4h
 
+; ---- Media Foundation GUIDs (printed by tools\print_mf.cpp) ----
+iidIMFTransform  db 21h,0C1h,94h,0BFh,05h,5Bh,6Fh,4Eh,80h,00h,0BAh,59h,89h,61h,41h,4Dh
+iidIMFMEGen      db 52h,0BDh,0D0h,2Ch,0D5h,0BCh,89h,4Bh,0B6h,2Ch,0EAh,0DCh,0Ch,03h,1Eh,7Dh
+mftCatVideoEnc   db 7Dh,0ACh,9Eh,0F7h,45h,0E5h,87h,43h,0BDh,0EEh,0D6h,47h,0D7h,0BDh,0E4h,2Ah
+mediaTypeVideo   db 76h,69h,64h,73h,00h,00h,10h,00h,80h,00h,00h,0AAh,00h,38h,9Bh,71h
+fmtHEVC          db 48h,45h,56h,43h,00h,00h,10h,00h,80h,00h,00h,0AAh,00h,38h,9Bh,71h
+fmtNV12          db 4Eh,56h,31h,32h,00h,00h,10h,00h,80h,00h,00h,0AAh,00h,38h,9Bh,71h
+mfMtMajorType    db 8Eh,0A1h,0EBh,48h,0C9h,0F8h,87h,46h,0BFh,11h,0Ah,74h,0C9h,0F9h,6Ah,8Fh
+mfMtSubtype      db 9Ah,4Ch,0E3h,0F7h,0E8h,42h,14h,47h,0B7h,4Bh,0CBh,29h,0D7h,2Ch,35h,0E5h
+mfMtAvgBitrate   db 24h,26h,33h,20h,0Dh,0FBh,9Eh,4Dh,0BDh,0Dh,0CBh,0F6h,78h,6Ch,10h,2Eh
+mfMtFrameSize    db 3Dh,0C3h,52h,16h,0B2h,0D6h,12h,40h,0B8h,34h,72h,03h,08h,49h,0A3h,7Dh
+mfMtFrameRate    db 0E8h,0A2h,59h,0C4h,2Ch,3Dh,44h,4Eh,0B1h,32h,0FEh,0E5h,15h,6Ch,7Bh,0B0h
+mfMtPixelAspect  db 1Eh,6Ah,37h,0C6h,0Ah,8Dh,27h,40h,0BEh,45h,6Dh,9Ah,0Ah,0D3h,9Bh,0B6h
+mfMtInterlace    db 0B8h,4Bh,72h,0E2h,76h,0E6h,06h,48h,0B4h,0B2h,0A8h,0D6h,0EFh,0B4h,4Ch,0CDh
+mfAsyncUnlock    db 6Bh,6Dh,66h,0E5h,22h,34h,0B6h,4Eh,0A4h,21h,0DAh,7Dh,0B1h,0F8h,0E2h,07h
+mfLowLatency     db 1Ah,89h,27h,9Ch,7Ah,0EDh,0E1h,40h,88h,0E8h,0B2h,27h,27h,0A0h,24h,0EEh
+
+szMfStart    db "MF: MFStartup hr=", 0
+szMfEnum     db "MF: MFTEnumEx hr=", 0
+szMfFound    db "MF: hardware HEVC encoder MFTs found=", 0
+szMfActivate db "MF: ActivateObject hr=", 0
+szMfAttrs    db "MF: transform GetAttributes hr=", 0
+szMfCreate   db "MF: MFCreateMediaType hr=", 0
+szMfOutType  db "MF: SetOutputType hr=", 0
+szMfInType   db "MF: SetInputType hr=", 0
+szMfSetAttr  db "MF: SetGUID/SetUINT hr=", 0
+szMfOutSize  db "MF: output stream cbSize=", 0
+szMfSupplies db "MF: provides_samples=", 0
+szMfMsg      db "MF: ProcessMessage hr=", 0
+szMfReady    db "MF: encoder configured (HEVC <- NV12)", 13, 10, 0
+
 ; IID_ID3D11Device {db6f6ddb-ac77-4e88-8253-819df9bbf140} — first three fields little-endian
 iidD3D11Device db 0DBh,6Dh,6Fh,0DBh,77h,0ACh,88h,4Eh,82h,53h,81h,9Dh,0F9h,0BBh,0F1h,40h
 
@@ -252,6 +292,19 @@ vpInSpace dd ?                 ; D3D11_VIDEO_PROCESSOR_COLOR_SPACE (input)
 vpOutSpace dd ?                ; D3D11_VIDEO_PROCESSOR_COLOR_SPACE (output)
 ySum      dd ?
 uvSum     dd ?
+
+pActivates dq ?                ; IMFActivate** returned by MFTEnumEx
+mftCount  dd ?
+pActivate dq ?                 ; IMFActivate*
+pTransform dq ?                ; IMFTransform*
+pEventGen dq ?                 ; IMFMediaEventGenerator* (QI of the transform)
+pAttrs    dq ?                 ; IMFAttributes* of the transform
+pOutType  dq ?                 ; IMFMediaType* (HEVC)
+pInType   dq ?                 ; IMFMediaType* (NV12)
+mftOutInfo db 32 dup(?)        ; MFT_OUTPUT_STREAM_INFO {dwFlags, cbSize, cbAlignment}
+mftRegInfo db 32 dup(?)        ; MFT_REGISTER_TYPE_INFO {guidMajorType, guidSubtype}
+providesSamples dd ?
+outBufSize dd ?
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
 pDup      dq ?                 ; IDXGIOutputDuplication*
@@ -1627,6 +1680,301 @@ rel_if_done:
     ret
 rel_if endp
 
+; Copy a 16-byte GUID: rcx = dest, rdx = src.
+copy16 proc
+    mov     rax, qword ptr [rdx]
+    mov     qword ptr [rcx], rax
+    mov     rax, qword ptr [rdx+8]
+    mov     qword ptr [rcx+8], rax
+    ret
+copy16 endp
+
+; Media Foundation HEVC encoder probe: start the platform, enumerate the hardware HEVC encoder
+; MFT, activate it, unlock async + low latency, set the HEVC output type and the NV12 input type,
+; then begin streaming.
+;
+; Vtable slots (see mftransform.h / mfobjects.h):
+;   IMFTransform: GetOutputStreamInfo = 56, GetAttributes = 64, SetInputType = 120,
+;                 SetOutputType = 128, ProcessMessage = 184, ProcessInput = 192, ProcessOutput = 200
+;   IMFAttributes: SetUINT32 = 168, SetUINT64 = 176, SetGUID = 192
+;   IMFActivate: ActivateObject = 264
+;   IMFMediaEventGenerator: GetEvent = 24 ; IMFMediaEvent: GetType = 264
+run_encoder_probe proc
+    push    r12
+    push    r13
+    sub     rsp, 88h
+
+    mov     qword ptr [pActivates], 0
+    mov     qword ptr [pActivate], 0
+    mov     qword ptr [pTransform], 0
+    mov     qword ptr [pAttrs], 0
+    mov     qword ptr [pOutType], 0
+    mov     qword ptr [pInType], 0
+    mov     dword ptr [mftCount], 0
+
+    mov     ecx, 20070h                    ; MF_VERSION
+    xor     edx, edx
+    call    MFStartup
+    test    eax, eax
+    jz      mf_started
+    mov     edx, eax
+    lea     rcx, szMfStart
+    call    emit_num
+    jmp     enc_done
+
+mf_started:
+    lea     rcx, mftRegInfo                ; MFT_REGISTER_TYPE_INFO{ video, HEVC }
+    lea     rdx, mediaTypeVideo
+    call    copy16
+    lea     rcx, mftRegInfo+16
+    lea     rdx, fmtHEVC
+    call    copy16
+
+    lea     rcx, mftCatVideoEnc
+    mov     edx, 44h                       ; MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER
+    xor     r8d, r8d
+    lea     r9, mftRegInfo
+    lea     rax, pActivates
+    mov     qword ptr [rsp+20h], rax
+    lea     rax, mftCount
+    mov     qword ptr [rsp+28h], rax
+    call    MFTEnumEx
+    test    eax, eax
+    jz      mf_enumed
+    mov     edx, eax
+    lea     rcx, szMfEnum
+    call    emit_num
+    jmp     enc_done
+
+mf_enumed:
+    lea     rcx, szMfFound
+    mov     edx, mftCount
+    call    emit_num
+    cmp     dword ptr [mftCount], 0
+    jz      enc_cleanup
+    mov     rax, pActivates
+    mov     rcx, qword ptr [rax]
+    mov     pActivate, rcx
+    test    rcx, rcx
+    jz      enc_cleanup
+    mov     rax, [rcx]
+    lea     rdx, iidIMFTransform
+    lea     r8, pTransform
+    call    qword ptr [rax+264]            ; IMFActivate::ActivateObject
+    test    eax, eax
+    jz      mf_activated
+    mov     edx, eax
+    lea     rcx, szMfActivate
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_activated:
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    lea     rdx, pAttrs
+    call    qword ptr [rax+64]             ; GetAttributes
+    test    eax, eax
+    jz      mf_got_attrs
+    mov     edx, eax
+    lea     rcx, szMfAttrs
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_got_attrs:
+    mov     rcx, pAttrs
+    mov     rax, [rcx]
+    lea     rdx, mfAsyncUnlock
+    mov     r8d, 1
+    call    qword ptr [rax+168]            ; MF_TRANSFORM_ASYNC_UNLOCK
+    mov     rcx, pAttrs
+    mov     rax, [rcx]
+    lea     rdx, mfLowLatency
+    mov     r8d, 1
+    call    qword ptr [rax+168]            ; MF_LOW_LATENCY
+
+    ; ---- output type: HEVC 1920x1080 @30, 12 Mbps ----
+    lea     rcx, pOutType
+    call    MFCreateMediaType
+    test    eax, eax
+    jz      mf_out_created
+    mov     edx, eax
+    lea     rcx, szMfCreate
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_out_created:
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtMajorType
+    lea     r8, mediaTypeVideo
+    call    qword ptr [rax+192]            ; SetGUID(MAJOR, video)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtSubtype
+    lea     r8, fmtHEVC
+    call    qword ptr [rax+192]            ; SetGUID(SUBTYPE, HEVC)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtAvgBitrate
+    mov     r8d, 0B71B00h                  ; 12 000 000
+    call    qword ptr [rax+168]            ; SetUINT32(AVG_BITRATE)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtInterlace
+    mov     r8d, 2                         ; MFVideoInterlace_Progressive
+    call    qword ptr [rax+168]            ; SetUINT32(INTERLACE_MODE)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtFrameSize
+    mov     r8, 78000000438h               ; 1920 << 32 | 1080
+    call    qword ptr [rax+176]            ; SetUINT64(FRAME_SIZE)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtFrameRate
+    mov     r8, 1E00000001h                ; 30 << 32 | 1
+    call    qword ptr [rax+176]            ; SetUINT64(FRAME_RATE)
+    mov     rcx, pOutType
+    mov     rax, [rcx]
+    lea     rdx, mfMtPixelAspect
+    mov     r8, 100000001h                 ; 1 << 32 | 1
+    call    qword ptr [rax+176]            ; SetUINT64(PIXEL_ASPECT_RATIO)
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    xor     edx, edx
+    mov     r8, pOutType
+    xor     r9d, r9d
+    call    qword ptr [rax+128]            ; SetOutputType(0, type, 0)
+    test    eax, eax
+    jz      mf_out_set
+    mov     edx, eax
+    lea     rcx, szMfOutType
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_out_set:
+    ; ---- input type: NV12, same geometry ----
+    lea     rcx, pInType
+    call    MFCreateMediaType
+    test    eax, eax
+    jz      mf_in_created
+    mov     edx, eax
+    lea     rcx, szMfCreate
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_in_created:
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtMajorType
+    lea     r8, mediaTypeVideo
+    call    qword ptr [rax+192]
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtSubtype
+    lea     r8, fmtNV12
+    call    qword ptr [rax+192]            ; SetGUID(SUBTYPE, NV12)
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtInterlace
+    mov     r8d, 2
+    call    qword ptr [rax+168]
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtFrameSize
+    mov     r8, 78000000438h
+    call    qword ptr [rax+176]
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtFrameRate
+    mov     r8, 1E00000001h
+    call    qword ptr [rax+176]
+    mov     rcx, pInType
+    mov     rax, [rcx]
+    lea     rdx, mfMtPixelAspect
+    mov     r8, 100000001h
+    call    qword ptr [rax+176]
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    xor     edx, edx
+    mov     r8, pInType
+    xor     r9d, r9d
+    call    qword ptr [rax+120]            ; SetInputType(0, type, 0)
+    test    eax, eax
+    jz      mf_in_set
+    mov     edx, eax
+    lea     rcx, szMfInType
+    call    emit_num
+    jmp     enc_cleanup
+
+mf_in_set:
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    xor     edx, edx
+    lea     r8, mftOutInfo
+    call    qword ptr [rax+56]             ; GetOutputStreamInfo(0)
+    test    eax, eax
+    jnz     enc_cleanup
+    mov     eax, dword ptr [mftOutInfo]
+    and     eax, 300h                      ; PROVIDES_SAMPLES | CAN_PROVIDE_SAMPLES
+    mov     providesSamples, eax
+    mov     eax, dword ptr [mftOutInfo+4]
+    mov     outBufSize, eax
+    lea     rcx, szMfOutSize
+    mov     edx, outBufSize
+    call    emit_num
+    lea     rcx, szMfSupplies
+    mov     edx, providesSamples
+    call    emit_num
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    mov     edx, 10000000h                 ; MFT_MESSAGE_NOTIFY_BEGIN_STREAMING
+    xor     r8d, r8d
+    call    qword ptr [rax+184]            ; ProcessMessage
+    test    eax, eax
+    jnz     mf_msg_fail
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    mov     edx, 10000003h                 ; MFT_MESSAGE_NOTIFY_START_OF_STREAM
+    xor     r8d, r8d
+    call    qword ptr [rax+184]
+    test    eax, eax
+    jnz     mf_msg_fail
+    lea     rcx, szMfReady
+    call    emit_z
+    jmp     enc_cleanup
+
+mf_msg_fail:
+    mov     edx, eax
+    lea     rcx, szMfMsg
+    call    emit_num
+
+enc_cleanup:
+    mov     rcx, pOutType
+    call    rel_if
+    mov     rcx, pInType
+    call    rel_if
+    mov     rcx, pAttrs
+    call    rel_if
+    mov     rcx, pTransform
+    call    rel_if
+    mov     rcx, pActivate
+    call    rel_if
+    mov     rcx, pActivates
+    test    rcx, rcx
+    jz      enc_done
+    call    CoTaskMemFree
+    mov     qword ptr [pActivates], 0
+
+enc_done:
+    add     rsp, 88h
+    pop     r13
+    pop     r12
+    ret
+run_encoder_probe endp
+
 ; int mainCRTStartup(void)
 mainCRTStartup proc
     sub     rsp, 38h
@@ -1709,6 +2057,9 @@ mainCRTStartup proc
 
     ; ---- DXGI adapter/output probe ----
     call    run_dxgi_probe
+
+    ; ---- Media Foundation HEVC encoder probe ----
+    call    run_encoder_probe
 
     mov     rcx, logHandle
     call    CloseHandle
