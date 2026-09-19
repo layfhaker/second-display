@@ -84,6 +84,106 @@
 Ещё не сделано: force keyframe вместо пересоздания энкодера при подключении клиента; убрать мёртвый
 UDP/RNDIS-код из `Server.cs`.
 
+## Сессия 2026-09-19 (вечер): мигающие окна, чёрный экран, падение хоста, adb
+
+Хронология: 22:16 хост перезапущен с `CREATE_NO_WINDOW` → 22:26 чёрный экран (фолт энкодера) →
+23:05 падение хоста → 23:07 перезапуск → 23:23 перезапуск уже с новыми D3D11-флагами.
+
+1. **Мигающие консольные окна (`13d6177`).** Rust-хост запускал `adb`/`pnputil`/`powershell` без
+   `CREATE_NO_WINDOW` (в C# было `CreateNoWindow=true`), поэтому каждый опрос adb (~1/с) мигал
+   консольным окном. Фикс: флаг выставлен всем дочерним процессам (`adb.rs::run_process`,
+   `AdbLauncher` в `orchestrator.rs`).
+2. **Чёрный экран 22:26 — энкодер фолтнул, а его пересоздание зависло навсегда.**
+   Лог: `Encoder ProcessInput failed: E_POINTER` → `flagging for restart` → `Encoder unhealthy …
+   recreating`, и дальше полная тишина: ни пересозданного энкодера, ни fps. Клиент подключён,
+   видео нет. Причина: `HevcEncoder::drop → dispose()` вызывал **`MFShutdown()` на каждое**
+   пересоздание (пока живые MF-объекты) и делал **неограниченный `join()`** — поток стрима
+   вставал именно здесь. Фикс (`c97c633`): MF-платформа поднимается один раз на процесс
+   (`OnceLock`), `MFShutdown` из drop убран; `dispose()` ждёт поток 1.5 с и при неудаче
+   отсоединяет его (с записью в лог); логи добавлены по краям обоих `Drop`, чтобы будущий залипон
+   называл свой шаг, а не молчал.
+3. **Падение хоста 23:05:58 — наш баг, не драйвер.** WER (event 1000): сбойный модуль — **сам
+   `SecondDisplay.Host.exe`**, код `0xC0000409` (подкод 7 = `FAST_FAIL_FATAL_APP_EXIT`), то есть
+   `abort()`/fail-fast внутри процесса. По списку модулей WER (mfplat, RTWorkQ, Windows.Media,
+   `mfx_mft_h265ve_64`, `libmfx64-gen`, `igd11dxva64`) он умер в пути **захват→VPP→энкодер**, а не
+   на старте. Событий TDR GPU (`4101`/`igfx`/`igdkmd`) в тот день **нет**.
+   Наиболее правдоподобная причина: Rust создавал D3D11-девайс не так, как рабочий C#-эталон —
+   только `BGRA_SUPPORT` (без `VIDEO_SUPPORT`), один feature level `11_0` и без
+   `SetMultithreadProtected(true)`; при этом этот же девайс отдаётся MF-энкодеру и используется из
+   двух потоков одновременно. Фикс (`1db5f58`): `BGRA_SUPPORT | VIDEO_SUPPORT`, уровни
+   `11_1/11_0/10_1` и multithread-защита — ровно как в `DxgiCapture.cs`.
+4. **Лог больше не уничтожает улики.** `log.rs::init` затирал `host.log` на старте
+   (`.truncate(true)`) — из-за этого контекст падения 23:05 восстановить не удалось. Теперь прошлый
+   запуск уезжает в `host.log.prev`.
+5. **adb: файлы исчезают из-за Defender.** `Get-MpThreat`: `Trojan:Win32/Bearfoos.B!ml` — известный
+   ложный ML-детект на Android platform-tools; события 1116/1117, изымались
+   `_devhome\...\platform-tools\adb.exe` и `build\staging\...\adb.exe` (триггер — наш хост и ISCC).
+   При этом все три копии adb **идентичны по хэшу, подписаны Google и не повреждены**, а сам adb
+   падает с той же сигнатурой `abort` (в `ucrtbase.dll`) — то есть «битый бинарь» был неверной
+   гипотезой. Попутно: в `bin\rust` **нет** папки `platform-tools`, поэтому ветка «предпочесть adb
+   рядом с exe» (её ждёт и установщик) не срабатывает и хост уходит на PATH; в `adb.rs` есть
+   мёртвый fallback-путь (`C:\Users\admin\android-build\...` — без `_devhome`).
+   **Требует админских прав:** исключение Defender для нашего adb и вынос `platform-tools` в
+   `bin\rust`.
+6. **Не долбить GPU/дисплейный стек во время стрима (урок).** Серии проб с `DuplicateOutput` и
+   `--selftest-gpu` подряд десятками создают D3D11-девайсы и дубликации; вечером это совпало с
+   общей нестабильностью (пачки падений adb, «DLL init failed», дальнейшее зависание системы).
+   Отладку таких проб делать по одному прогону и, где можно, при остановленном хосте.
+
+**Найдено, но не исправлено (Rust-хост):** порядок `Drop` в `DxgiCapture` (`device` объявлен
+раньше `dup`/`staging`/`output1` и освобождается первым, тогда как C# освобождает в обратном
+порядке); утечки `ManuallyDrop` (per-frame входная view в `gpu_convert.rs:180`, `pSample`/`pEvents`
+в `hevc.rs` — рефкаунты растут каждый кадр); гонка при повторном дублировании
+(`reinit_duplication` роняет дубликацию при живом кадре); отсутствие `catch_unwind` вокруг
+COM-колбэка (паника через FFI = `abort()` вместо ошибки). Плюс **VDD-драйвер нестабилен**:
+`MttVDD.dll` runtime-failures (DriverFrameworks 10111/10121) и 14× не загрузился `WUDFRd` для
+`ROOT\DISPLAY\0000` — вероятный триггер падений в этом тракте.
+
+## Хост на ассемблере (`host-asm/`) — 2026-09-19
+
+Полная переписка хоста на **MASM** (`ml64` + `link` из VS BuildTools; NASM в системе нет) — рядом с
+C# и Rust, третья реализация. Сборка: `host-asm\build.ps1` → `build\host-asm\SecondDisplay.Host.Asm.exe`
+(линкуются `kernel32`, `ws2_32`, `ole32`, `dxgi`, `d3d11`, `mfplat`). Подробности, грабли и
+следующие шаги — в **`host-asm/README.md`**.
+
+Сделано (каждый милестоун собран и проверен живым прогоном):
+- **M1–M2**: своя точка входа `mainCRTStartup`, прямые вызовы Win32, лог в
+  `%LOCALAPPDATA%\SecondDisplay\host-asm.log` с локальным временем.
+- **M3** (`cd96e64`): запуск `adb devices` через `CreateProcessA` + `CreatePipe` + `CREATE_NO_WINDOW`.
+- **M4** (`1d47332`): **TCP на `ws2_32`** — `WSAStartup`/`socket`/`SO_REUSEADDR`/`bind`/`listen`/
+  `select`/`accept`/`recv`/`send`, разбор 5-байтного заголовка, поля `HELLO`, ответ `READY`.
+- **M5** (`6b878ee`): **COM с нуля** — `CoInitializeEx` → `CreateDXGIFactory1` → перечисление
+  адаптеров и выходов **ручными вызовами через vtables**.
+- **M6** (`a227b41`): **захват через Desktop Duplication** — `D3D11CreateDevice` → QI `IDXGIOutput1`
+  → `DuplicateOutput` → `AcquireNextFrame` → QI `ID3D11Texture2D` → staging `CreateTexture2D` →
+  `CopyResource` → `Map` → контрольная сумма кадра.
+- **M7a** (`50b152d`): **GPU BGRA→NV12** через `ID3D11VideoProcessor` (`VideoProcessorBlt`) с
+  проверкой по Y/UV-плоскостям.
+- **M7b-1** (`989d594`): **Media Foundation и аппаратный HEVC-энкодер** — `MFStartup` →
+  `MFTEnumEx(HARDWARE|SORTANDFILTER)` (найдено 2 MFT) → `ActivateObject` → снятие async-лока и
+  low latency → HEVC-выход + NV12-вход → `GetOutputStreamInfo` (`provides_samples=0x100`) →
+  `ProcessMessage(BEGIN_STREAMING/START_OF_STREAM)`.
+
+**Главный урок M6 (стоил почти целой сессии):** смещения vtable нельзя брать по памяти. Я взял
+`IDXGIOutput1::DuplicateOutput` за слот 17 (offset 136), а это **слот 22 (offset 176)**: у
+`IDXGIOutput` двенадцать собственных методов (включая `WaitForVBlank`, иной порядок
+`TakeOwnership`/`ReleaseOwnership` и три `GetGammaControl*`), а у `IDXGIOutput1` перед
+`DuplicateOutput` есть ещё `GetDisplaySurfaceData1`. Слот 17 — это `GetDisplaySurfaceData`, который
+QI'ил переданный девайс в `IDXGISurface` и возвращал `E_NOINTERFACE`: выглядело как «DXGI отказывает
+в дублировании». Второй баг там же: у `ID3D11DeviceContext::Map` пять параметров — `MapFlags` идёт в
+`[rsp+20h]`, а `pMappedResource` в `[rsp+28h]`; я положил указатель в `[rsp+20h]`, и D3D11 записал
+структуру по дикому адресу (AV в `d3d11.dll`).
+
+Поэтому теперь всё берётся из источников истины: `host-asm\tools\print_layouts.cpp` и
+`print_mf.cpp` печатают через компилятор MSVC **точные байты IID (`__uuidof`), `offsetof`-раскладки
+структур и значения enum**, а порядок методов vtable извлекается из заголовков SDK
+(`dxgi.h`/`dxgi1_2.h`/`d3d11.h`/`mftransform.h`/`mfobjects.h`). Отдельная мелочь, стоившая билда:
+hex-литерал MASM, начинающийся с A–F, обязан иметь ведущий ноль (`0C1h`, а не `C1h`).
+
+Дальше: **M7b-2** — асинхронный цикл событий MFT (`GetEvent` с `MF_EVENT_FLAG_NO_WAIT` →
+`METransformNeedInput=601` / `METransformHaveOutput=602`), подача кадра и вычитывание HEVC-потока;
+затем сессии/оркестратор и CLI.
+
 ## Rust-переписка хоста (`host-rs/`) — 2026-09-19
 
 Параллельно с C#-хостом (`host/`) начата переписка на Rust; **обе версии сосуществуют**, C#

@@ -142,3 +142,25 @@ RenderTarget курсору** (быстрый тест). Если не помо�
   авто-подключение при появлении планшета по USB.
 - Установщик (готовый драйвер MttVDD + host + GUI). Драйвер уже подписан (MttVDD); наш host/GUI —
   по желанию подписать для релиза.
+
+## Фаза 6 — Хост на ассемблере (`host-asm/`) 🚧 в работе
+Экспериментальная третья реализация хоста на **MASM** (`ml64` + `link`), рядом с C# и Rust: проверить,
+что весь тракт (adb → TCP-протокол → DXGI Desktop Duplication → GPU-конвертация BGRA→NV12 →
+аппаратный HEVC) поднимается вообще без C#/Rust — только Win32/COM/DXGI/Media Foundation напрямую.
+Боевой хост при этом остаётся на Rust, C# — эталон.
+
+- ✅ **M1–M3**: своя точка входа `mainCRTStartup`, лог в `%LOCALAPPDATA%`, `adb devices` через
+  `CreateProcessA` + pipe + `CREATE_NO_WINDOW`.
+- ✅ **M4**: TCP на `ws2_32` — листенер, разбор `HELLO`, ответ `READY`.
+- ✅ **M5**: COM с нуля — `CreateDXGIFactory1`, перечисление адаптеров и выходов ручными вызовами
+  vtables.
+- ✅ **M6**: захват кадра — `DuplicateOutput` → `AcquireNextFrame` → staging → `CopyResource` →
+  `Map` → контрольная сумма.
+- ✅ **M7a**: GPU BGRA→NV12 через `ID3D11VideoProcessor` (`VideoProcessorBlt`), проверка по Y/UV.
+- ✅ **M7b-1**: Media Foundation + аппаратный HEVC-MFT (media types, async-лок, старт стрима).
+- ⏳ **M7b-2**: цикл событий MFT (601/602), подача кадра и вычитывание HEVC-потока.
+- ⏳ Дальше: zero-copy вход энкодера (`MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager`), сессии
+  (курсор, ввод, `PING`), оркестратор и CLI.
+
+Детали, грабли и метод (источники истины для vtable/IID/структур) — в **`host-asm/README.md`**;
+журнал сессии — в `docs/STATUS.md`.
