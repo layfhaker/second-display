@@ -14,8 +14,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Reference the UDP packetizer logic by compile include (no heavy deps). -->
+    <!-- Reference pure logic classes without heavy deps -->
     <Compile Include="..\SecondDisplay.Host\UdpPacketizer.cs" Link="UdpPacketizer.cs" />
+    <Compile Include="..\SecondDisplay.Host\DeviceReadiness.cs" Link="DeviceReadiness.cs" />
   </ItemGroup>
 
 </Project>

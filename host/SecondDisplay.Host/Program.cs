@@ -2,6 +2,12 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SecondDisplay.Host;
 
+// Attach to parent console if invoked from a command line; if launched headless (Task Scheduler,
+// startup), AttachConsole fails silently and zero terminal window is opened.
+[DllImport("kernel32.dll")]
+static extern bool AttachConsole(int dwProcessId);
+AttachConsole(-1);
+
 // Make process per-monitor DPI aware so we capture the FULL screen resolution,
 // not the DPI-virtualized one (otherwise only a corner of the screen is captured).
 DpiHelper.EnablePerMonitorDpiAwareness();
@@ -71,6 +77,11 @@ if (singleInstance == null)
     Console.WriteLine("Another SecondDisplay host is already running.");
     return;
 }
+
+string manualLogPath = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+    "SecondDisplay", "host.log");
+TeeTextWriter.Setup(manualLogPath);
 
 Console.WriteLine("SecondDisplay Host v0.1");
 Console.WriteLine("=================================================");

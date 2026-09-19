@@ -13,11 +13,53 @@ namespace SecondDisplay.Host;
 public sealed class VddController
 {
     private readonly string _friendlyName;
+    private string _instanceId = @"ROOT\DISPLAY\0000";
     private DateTime _lastLogTime = DateTime.MinValue;
 
     public VddController(string friendlyName = "Virtual Display Driver")
     {
         _friendlyName = friendlyName;
+    }
+
+    private bool RunPnpUtil(string arg, string instanceId)
+    {
+        try
+        {
+            string pnpPath = System.IO.Path.Combine(Environment.SystemDirectory, "pnputil.exe");
+            if (!System.IO.File.Exists(pnpPath)) pnpPath = "pnputil.exe";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = pnpPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add(arg);
+            psi.ArgumentList.Add(instanceId);
+
+            using var process = Process.Start(psi);
+            if (process == null) return false;
+            // pnputil needs a moment for a display adapter; too short a wait made it time out and
+            // fall back to the much slower PowerShell cmdlet path (~15s) on every teardown.
+            if (!process.WaitForExit(8000))
+            {
+                process.Kill();
+                Console.WriteLine($"[vdd] pnputil timeout ({arg})");
+                return false;
+            }
+            if (process.ExitCode == 0 || process.ExitCode == 3010)
+                return true;
+
+            Console.WriteLine($"[vdd] pnputil {arg} exit code {process.ExitCode}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[vdd] pnputil exception: {ex.Message}");
+            return false;
+        }
     }
 
     private (int exitCode, string stdout, string stderr) RunPowerShell(string command)
@@ -58,6 +100,12 @@ public sealed class VddController
 
     public void Enable()
     {
+        if (RunPnpUtil("/enable-device", _instanceId))
+        {
+            Console.WriteLine("[vdd] VDD enabled (fast pnputil).");
+            return;
+        }
+
         string command = $"$d = Get-PnpDevice -FriendlyName '{_friendlyName}' -ErrorAction SilentlyContinue; if ($d) {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false; 'OK' }} else {{ 'NOTFOUND' }}";
 
         try
@@ -90,6 +138,12 @@ public sealed class VddController
         // Remove phantom monitors from display topology BEFORE disabling the driver,
         // otherwise Disable-PnpDevice leaves the phantom visible to EnumDisplayDevices.
         RemoveVddMonitors();
+
+        if (RunPnpUtil("/disable-device", _instanceId))
+        {
+            Console.WriteLine("[vdd] VDD disabled (fast pnputil).");
+            return;
+        }
 
         string command = $"$d = Get-PnpDevice -FriendlyName '{_friendlyName}' -ErrorAction SilentlyContinue; if ($d) {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false; 'OK' }} else {{ 'NOTFOUND' }}";
 
@@ -247,7 +301,7 @@ public sealed class VddController
                 Console.WriteLine($"[vdd] Removing phantom monitor: {devName}");
                 NativeMethods.ChangeDisplaySettingsEx(devName, IntPtr.Zero, IntPtr.Zero, 0x08 /*DETACH*/, IntPtr.Zero);
             }
-            Thread.Sleep(500);
+            Thread.Sleep(100);
         }
         catch (Exception ex)
         {

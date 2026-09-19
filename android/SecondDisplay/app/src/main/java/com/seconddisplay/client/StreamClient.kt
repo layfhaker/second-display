@@ -33,6 +33,12 @@ class StreamClient(
     private val onDisconnect: () -> Unit
 ) {
     private val running = AtomicBoolean(false)
+
+    // Set when stop() is called deliberately (e.g. the activity is replacing this client with a
+    // new one). In that case the read thread must NOT report a disconnect — otherwise the activity
+    // schedules another reconnect from the previous client's own teardown, and the two of them
+    // ping-pong forever (each reconnect tears the codec down again → blinking black).
+    private val stopped = AtomicBoolean(false)
     private var socket: Socket? = null
     private var outputStream: OutputStream? = null
     private val outboundQueue = ArrayBlockingQueue<OutboundEvent>(128)
@@ -51,12 +57,13 @@ class StreamClient(
                 Log.e(TAG, "Connection failed", e)
             } finally {
                 running.set(false)
-                onDisconnect()
+                if (!stopped.get()) onDisconnect()
             }
         }.start()
     }
 
     fun stop() {
+        stopped.set(true)
         running.set(false)
         try { socket?.close() } catch (_: Exception) {}
     }
@@ -73,12 +80,9 @@ class StreamClient(
         val sock = Socket()
         sock.tcpNoDelay = true
         sock.connect(InetSocketAddress(host, port), 5000)
-        // Read timeout protects against a *fully dead* link (never self-heals), but it must
-        // NOT fire on a brief encoder hiccup — otherwise the client enters an endless
-        // reconnect loop whenever the host encoder stalls for a second (observed: 9
-        // reconnects in 2 min when enc-lat spiked to 2.6s). 20s gives the encoder/host
-        // watchdog time to recover and the stream to resume, while still dropping a truly
-        // dead connection.
+        // Read timeout protects against a *fully dead* link. The host now sends a heartbeat
+        // (PING) whenever it has no video to send (encoder stall/recreate), so a normal
+        // multi-second encoder hiccup no longer trips this and causes a reconnect storm.
         sock.soTimeout = 20_000
         socket = sock
         val input = sock.getInputStream()

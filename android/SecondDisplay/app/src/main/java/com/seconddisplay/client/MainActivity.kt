@@ -4,6 +4,7 @@ import android.graphics.Color
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
@@ -32,12 +33,25 @@ class MainActivity : AppCompatActivity() {
     private val frameQueue = ArrayBlockingQueue<VideoFrame>(2)
     private var decodeThread: Thread? = null
 
+    // Decoder liveness: timestamps for the stall watchdog, plus a guard so only one reconnect
+    // is queued even if several failure paths fire at once.
+    @Volatile private var lastFrameInMs = 0L
+    @Volatile private var lastOutputMs = 0L
+    @Volatile private var sawKeyframe = false
+    private val reconnectPending = AtomicBoolean(false)
+
     private var serverWidth = 0
     private var serverHeight = 0
     private var requestedRefreshRate = 60f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e(TAG, "FATAL CRASH on thread ${thread.name}: ${throwable.message}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         requestedRefreshRate = requestBestDisplayMode()
 
@@ -83,7 +97,11 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { setupVideoView(ready.width, ready.height) }
             },
             onFrame = { frame ->
-                if (frame.keyframe) frameQueue.clear()
+                lastFrameInMs = SystemClock.elapsedRealtime()
+                if (frame.keyframe) {
+                    sawKeyframe = true
+                    frameQueue.clear()
+                }
                 if (!frameQueue.offer(frame)) {
                     frameQueue.poll()
                     frameQueue.offer(frame)
@@ -98,16 +116,29 @@ class MainActivity : AppCompatActivity() {
                 // codec on the UI thread, which is what the UI freeze was. Instead, signal
                 // the main thread to schedule a clean reconnect.
                 teardownCodec()
-                runOnUiThread {
-                    if (!isFinishing && !isDestroyed) {
-                        // Small delay so the network stack settles, then restart cleanly.
-                        root.postDelayed({ startClient() }, 2000)
-                    }
-                }
+                scheduleReconnect()
             }
         )
         KeyForwarder.attach(client!!)
         client?.start(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi, refreshRate)
+    }
+
+    // Schedules a single clean reconnect on the UI thread. Called from the network thread
+    // (onDisconnect) and from the decode thread (self-heal). The guard makes it idempotent, so a
+    // burst of failures can't queue several reconnects on top of each other.
+    private fun scheduleReconnect() {
+        if (!reconnectPending.compareAndSet(false, true)) return
+        runOnUiThread {
+            if (isFinishing || isDestroyed) {
+                reconnectPending.set(false)
+                return@runOnUiThread
+            }
+            // Small delay so the network stack settles, then restart cleanly.
+            root.postDelayed({
+                reconnectPending.set(false)
+                if (!isFinishing && !isDestroyed) startClient()
+            }, 1500)
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -223,6 +254,11 @@ class MainActivity : AppCompatActivity() {
             mc.start()
             codec = mc
             decoding.set(true)
+            // Arm the watchdog only once the first frame actually arrives (lastFrameInMs stays 0
+            // until then), and measure output liveness from now.
+            lastFrameInMs = 0L
+            lastOutputMs = SystemClock.elapsedRealtime()
+            sawKeyframe = false
             decodeThread = Thread { decodeLoop(mc) }.apply { start() }
             Log.i(TAG, "MediaCodec HEVC started ${serverWidth}x$serverHeight")
         } catch (e: Exception) {
@@ -254,19 +290,38 @@ class MainActivity : AppCompatActivity() {
 
     private fun decodeLoop(mc: MediaCodec) {
         val info = MediaCodec.BufferInfo()
+        var diedOnItsOwn = false
         try {
             while (decoding.get()) {
+                // Stall watchdog: only meaningful once a keyframe has been seen (otherwise a fresh
+                // codec waiting for its first IDR would trip it). If frames keep arriving but the
+                // decoder hasn't rendered anything for 5s, the MediaCodec is wedged — the socket
+                // stays alive in that case, so the read timeout never fires on its own.
+                val now = SystemClock.elapsedRealtime()
+                if (sawKeyframe && now - lastFrameInMs < 2000 && now - lastOutputMs > 5000) {
+                    Log.w(TAG, "Decoder stalled — frames arriving but no output for ${now - lastOutputMs}ms; restarting")
+                    diedOnItsOwn = true
+                    break
+                }
+
                 val frame = frameQueue.poll(50, TimeUnit.MILLISECONDS)
                 if (frame == null) {
                     drainOutputs(mc, info)
                     continue
                 }
-                // Wait for a free input buffer so we never drop an access unit (params live here).
+
+                // Wait (bounded) for a free input buffer so we never drop an access unit
+                // (SPS/PPS live here). If none frees up, the decoder is stuck — bail out.
                 var inIdx = -1
+                var attempts = 0
                 while (decoding.get()) {
                     inIdx = mc.dequeueInputBuffer(10_000)
                     if (inIdx >= 0) break
                     drainOutputs(mc, info)
+                    if (++attempts >= 200) { // ~2s without an input buffer
+                        diedOnItsOwn = true
+                        break
+                    }
                 }
                 if (inIdx < 0) break
 
@@ -279,6 +334,14 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Decode loop error", e)
+            diedOnItsOwn = true
+        }
+
+        // A normal teardown flips `decoding` to false before we get here; if it's still true the
+        // decoder died on its own and nothing else would recover the stream — reconnect.
+        if (diedOnItsOwn && decoding.get()) {
+            decoding.set(false)
+            scheduleReconnect()
         }
     }
 
@@ -286,6 +349,7 @@ class MainActivity : AppCompatActivity() {
         var outIdx = mc.dequeueOutputBuffer(info, 0)
         while (outIdx >= 0) {
             mc.releaseOutputBuffer(outIdx, true) // render to surface
+            lastOutputMs = SystemClock.elapsedRealtime()
             outIdx = mc.dequeueOutputBuffer(info, 0)
         }
     }

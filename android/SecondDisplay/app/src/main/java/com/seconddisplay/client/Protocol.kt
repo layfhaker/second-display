@@ -13,6 +13,11 @@ object PacketType {
     const val TOUCH: Byte = 0x20
     const val SCROLL: Byte = 0x21
     const val KEY: Byte = 0x22
+
+    // Keep-alive with an empty payload, sent by the host while no video is flowing (encoder
+    // stalled or being recreated). We ignore its contents — it only exists to keep the socket's
+    // read timeout from firing. See the read loop in StreamClient.
+    const val PING: Byte = 0x30
 }
 
 data class ReadyPacket(

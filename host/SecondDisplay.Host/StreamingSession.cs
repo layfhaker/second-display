@@ -188,9 +188,15 @@ public sealed class StreamingSession : IDisposable
                     }
                 }
 
-                // Watchdog: recreate the encoder if its async MFT faulted or stopped emitting output
-                // (>2.5s with no encoded frame while we keep feeding it). Keeps the stream self-healing.
-                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 2500)))
+                // Watchdog: recreate the encoder only if its async MFT faulted, or if it stopped
+                // emitting output for a long time while we keep feeding it. The threshold is very
+                // generous (12s) on purpose: recreating the encoder costs ~5-12s of total blackout,
+                // and the old Intel iGPU driver routinely stalls for several seconds under load
+                // (a window drag spiked it to 4.6-7.8s in the host log) and then recovers on its own.
+                // Killing it during such a hiccup was self-inflicting the black frame the user saw.
+                // The client now receives heartbeats while no video flows, so a long silent stretch
+                // no longer triggers a client reconnect either. Only a truly wedged encoder is recreated.
+                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 12000)))
                 {
                     Console.WriteLine($"Encoder unhealthy (faulted={encoder.Faulted}, idle={frameStart - lastOutputMs}ms) — recreating");
                     encoder.Dispose(); encoder = null;

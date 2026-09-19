@@ -119,9 +119,10 @@ public sealed class TeeTextWriter : TextWriter
     }
 
     /// <summary>
-    /// Setup: ensure the parent directory of logPath exists, truncate the log file,
+    /// Setup: ensure the parent directory of logPath exists, append to the log file
+    /// (or reset if it exceeds 10MB to prevent unbounded disk usage),
     /// redirect Console.Out and Console.Error through TeeTextWriter instances,
-    /// and write a startup banner.
+    /// and write a startup banner. Never creates .old files.
     /// </summary>
     public static void Setup(string logPath)
     {
@@ -129,8 +130,15 @@ public sealed class TeeTextWriter : TextWriter
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        // Truncate the file (create fresh), tolerating another handle being open.
-        using (new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite)) { }
+        try
+        {
+            var fi = new FileInfo(logPath);
+            if (fi.Exists && fi.Length > 10 * 1024 * 1024)
+            {
+                using (new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite)) { }
+            }
+        }
+        catch { }
 
         // Capture current console output. One shared writer backs both Out and Error so there is
         // a single file handle (avoids the two-writers sharing violation).
@@ -139,8 +147,8 @@ public sealed class TeeTextWriter : TextWriter
         Console.SetOut(tee);
         Console.SetError(tee);
 
-        // Write startup banner
-        string banner = $"=== SecondDisplay host log {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===";
+        // Write startup banner with PID
+        string banner = $"\n=== SecondDisplay host log START: {DateTime.Now:yyyy-MM-dd HH:mm:ss} (PID {Environment.ProcessId}) ===";
         Console.WriteLine(banner);
     }
 }

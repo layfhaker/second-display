@@ -219,9 +219,9 @@ public sealed class Server : IDisposable
                 {
                     _clients[i].SendFrame(ptsMicros, keyframe, jpegData);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    Console.WriteLine("Client disconnected");
+                    Console.WriteLine($"[server] Client {_clients[i].RemoteEndPoint} disconnected: {ex.Message}");
                     _clients[i].Dispose();
                     _clients.RemoveAt(i);
                 }
@@ -250,9 +250,9 @@ public sealed class Server : IDisposable
                 {
                     _clients[i].SendCursor(visible, x, y, w, h, bgra);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    Console.WriteLine("Client disconnected");
+                    Console.WriteLine($"[server] Client {_clients[i].RemoteEndPoint} disconnected: {ex.Message}");
                     _clients[i].Dispose();
                     _clients.RemoveAt(i);
                 }
@@ -369,10 +369,13 @@ internal sealed class ClientSession : IDisposable
     private CancellationTokenSource _cts = new();
 
     public int RefreshRate => (int)(_hello?.RefreshRate ?? 0);
+    public string RemoteEndPoint { get; }
+    public string DisconnectReason { get; private set; } = "Normal disconnect";
 
     public ClientSession(TcpClient tcp, int captureWidth, int captureHeight)
     {
         _tcp = tcp;
+        RemoteEndPoint = tcp.Client.RemoteEndPoint?.ToString() ?? "unknown";
         _stream = tcp.GetStream();
         _captureWidth = captureWidth;
         _captureHeight = captureHeight;
@@ -409,7 +412,7 @@ internal sealed class ClientSession : IDisposable
     public void SendFrame(long ptsMicros, bool keyframe, byte[] jpegData)
     {
         if (_cts.IsCancellationRequested)
-            throw new IOException("Client disconnected");
+            throw new IOException($"Client disconnected ({DisconnectReason})");
 
         var frame = VideoPacket.Video(ptsMicros, keyframe, jpegData);
         if (_sendQueue.TryAdd(frame, 0)) return;
@@ -421,7 +424,7 @@ internal sealed class ClientSession : IDisposable
     public void SendCursor(bool visible, int x, int y, int w, int h, byte[]? bgra)
     {
         if (_cts.IsCancellationRequested)
-            throw new IOException("Client disconnected");
+            throw new IOException($"Client disconnected ({DisconnectReason})");
 
         lock (_cursorLock)
         {
@@ -459,7 +462,12 @@ internal sealed class ClientSession : IDisposable
                     _keyQueue.Enqueue(Protocol.ParseKey(payload));
             }
         }
-        catch { _cts.Cancel(); }
+        catch (Exception ex)
+        {
+            if (!_cts.IsCancellationRequested)
+                DisconnectReason = $"Receive: {ex.GetType().Name} - {ex.Message}";
+            _cts.Cancel();
+        }
     }
 
     private void SendLoop()
@@ -467,8 +475,17 @@ internal sealed class ClientSession : IDisposable
         try
         {
             long sentCursorSeq = -1;
-            foreach (var frame in _sendQueue.GetConsumingEnumerable(_cts.Token))
+            while (!_cts.IsCancellationRequested)
             {
+                if (!_sendQueue.TryTake(out var frame, 2000, _cts.Token))
+                {
+                    // No video for 2s — the encoder is stalled or being recreated (~5s with zero
+                    // output). Send a heartbeat so the client's read timeout doesn't fire and
+                    // start a reconnect storm that tears the codec down mid-recovery.
+                    Protocol.WritePing(_stream);
+                    continue;
+                }
+
                 CursorState? cursor = null;
                 long cursorSeq;
                 lock (_cursorLock)
@@ -488,7 +505,12 @@ internal sealed class ClientSession : IDisposable
                 Protocol.WriteVideoFrame(_stream, frame.PtsMicros, frame.Keyframe, frame.Data);
             }
         }
-        catch { _cts.Cancel(); }
+        catch (Exception ex)
+        {
+            if (!_cts.IsCancellationRequested)
+                DisconnectReason = $"Send: {ex.GetType().Name} - {ex.Message}";
+            _cts.Cancel();
+        }
     }
 
     public void Dispose()

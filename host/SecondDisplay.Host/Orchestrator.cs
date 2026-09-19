@@ -13,17 +13,28 @@ namespace SecondDisplay.Host;
 /// </summary>
 public sealed class Orchestrator
 {
-    private const int PollIntervalMs = 1500;
+    private const int PollIntervalMs = 1000;
     private const int MissingPollsBeforeTeardown = 2; // debounce adb list blips
-    private const int SessionShutdownTimeoutMs = 5000;
-    // The tablet responds to ADB even in "charge only" USB mode. Picking "file transfer" re-enumerates
-    // USB and drops the ADB session — so require the device to be continuously present+responsive for a
-    // few polls before firing, letting the user settle the USB mode first. Each re-enumeration resets it.
-    private const int StableConnectPolls = 4; // ~4.5s of uninterrupted presence at PollIntervalMs
+    private const int SessionShutdownTimeoutMs = 1000; // fast shutdown
+    private const int StableConnectPolls = 2; // ~2s of uninterrupted readiness
 
     private readonly FpsOptions _opts;
     private readonly AdbController _adb;
     private readonly VddController _vdd;
+
+    private string? _lastLoggedReason;
+    private DateTime _lastLoggedReasonTime = DateTime.MinValue;
+
+    private void LogReadinessState(string serial, string reason)
+    {
+        DateTime now = DateTime.Now;
+        if (reason != _lastLoggedReason || (now - _lastLoggedReasonTime).TotalSeconds >= 10)
+        {
+            _lastLoggedReason = reason;
+            _lastLoggedReasonTime = now;
+            Console.WriteLine($"[orchestrator] Device {serial} waiting: {reason}");
+        }
+    }
 
     public Orchestrator(FpsOptions opts, AdbController adb, VddController vdd)
     {
@@ -102,7 +113,7 @@ public sealed class Orchestrator
         return null;
     }
 
-    /// <summary>First device (sorted) that is on ADB and has our app installed, or null.</summary>
+    /// <summary>First device (sorted) that is on ADB, has our app installed, and is ready (unlocked + MTP), or null.</summary>
     private string? FindFirstQualifying(CancellationToken ct)
     {
         IReadOnlyList<string> devices;
@@ -123,7 +134,16 @@ public sealed class Orchestrator
                 Console.WriteLine($"[orchestrator] HasApp({serial}) failed: {ex.Message}");
                 continue;
             }
-            if (hasApp) return serial;
+            if (!hasApp) continue;
+
+            var readiness = _adb.GetDeviceReadiness(serial);
+            if (!readiness.IsReady)
+            {
+                LogReadinessState(serial, readiness.Reason);
+                continue;
+            }
+
+            return serial;
         }
         return null;
     }
@@ -227,7 +247,7 @@ public sealed class Orchestrator
 
             Console.WriteLine($"[orchestrator] Streaming to {serial} on {monitor.Device} {monitor.Width}x{monitor.Height}");
 
-            RunStreamingLoop(serial, sessionTask, ct);
+            RunStreamingLoop(serial, localSession, sessionTask, ct);
         }
         catch (Exception ex)
         {
@@ -240,16 +260,14 @@ public sealed class Orchestrator
     }
 
     /// <summary>
-    /// Waits for a tablet client to actually connect after the session started. The tablet often
-    /// isn't ready the instant its USB serial appears (user hasn't picked "data transfer" yet, or
-    /// switching USB mode re-enumerates and drops the adb reverse tunnel). Re-applies reverse +
+    /// Waits for a tablet client to actually connect after the session started. Re-applies reverse +
     /// relaunches the client every few seconds until one connects. Returns false on timeout,
-    /// cancellation, session end, or debounced device loss.
+    /// cancellation, session end, unready device, or debounced device loss.
     /// </summary>
     private bool WaitForClient(StreamingSession session, string serial, Task sessionTask, CancellationToken ct)
     {
-        const int totalWaitMs = 60000; // give the user time to tap "data transfer" on the tablet
-        const int retryEveryMs = 4000; // re-apply reverse + am start on this cadence
+        const int totalWaitMs = 15000; // tablet is already unlocked + in MTP mode
+        const int retryEveryMs = 2500;
         var sw = Stopwatch.StartNew();
         long lastRetryMs = 0;
         int consecutiveMissing = 0;
@@ -279,6 +297,12 @@ public sealed class Orchestrator
             else
             {
                 consecutiveMissing = 0;
+                var readiness = _adb.GetDeviceReadiness(serial);
+                if (!readiness.IsReady)
+                {
+                    Console.WriteLine($"[orchestrator] Tablet {serial} is no longer ready ({readiness.Reason}) — aborting connection.");
+                    return false;
+                }
             }
 
             if (sw.ElapsedMilliseconds - lastRetryMs >= retryEveryMs)
@@ -295,10 +319,12 @@ public sealed class Orchestrator
         return session.HasClients;
     }
 
-    /// <summary>Polls while streaming: exits on ct cancel, session completion, or debounced device loss.</summary>
-    private void RunStreamingLoop(string serial, Task sessionTask, CancellationToken ct)
+    /// <summary>Polls while streaming: exits on ct cancel, session completion, debounced device loss, or device unready.</summary>
+    private void RunStreamingLoop(string serial, StreamingSession session, Task sessionTask, CancellationToken ct)
     {
         int consecutiveMissing = 0;
+        int consecutiveUnready = 0;
+        int noClientCount = 0;
 
         while (true)
         {
@@ -334,6 +360,49 @@ public sealed class Orchestrator
             else
             {
                 consecutiveMissing = 0;
+
+                // Check device readiness: if user locked the screen or switched USB away from MTP
+                var readiness = _adb.GetDeviceReadiness(serial);
+                if (!readiness.IsReady)
+                {
+                    consecutiveUnready++;
+                    Console.WriteLine($"[orchestrator] Device {serial} not ready ({readiness.Reason}) ({consecutiveUnready}/{MissingPollsBeforeTeardown})");
+                    if (consecutiveUnready >= MissingPollsBeforeTeardown)
+                    {
+                        Console.WriteLine($"[orchestrator] Tablet {serial} is no longer active ({readiness.Reason}) — tearing down.");
+                        return;
+                    }
+                }
+                else
+                {
+                    consecutiveUnready = 0;
+                }
+
+                // Check client connection state
+                if (!session.HasClients)
+                {
+                    noClientCount++;
+                    if (noClientCount == 1)
+                    {
+                        Console.WriteLine("[orchestrator] Client disconnected while tablet is connected. Checking Android crash logs...");
+                        _adb.DumpCrashLogs(serial);
+
+                        if (readiness.IsReady)
+                        {
+                            Console.WriteLine("[orchestrator] Tablet still awake — relaunching client app...");
+                            _adb.LaunchClient(serial);
+                        }
+                    }
+                    else if (noClientCount >= 5) // ~5 seconds without reconnect
+                    {
+                        Console.WriteLine("[orchestrator] Client did not reconnect — tearing down.");
+                        return;
+                    }
+                }
+                else
+                {
+                    noClientCount = 0;
+                }
             }
 
             SleepRespectingCt(PollIntervalMs, ct);

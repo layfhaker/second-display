@@ -12,6 +12,10 @@ public static class PacketType
     public const byte Touch = 0x20;
     public const byte Scroll = 0x21;
     public const byte Key = 0x22;
+
+    // Keep-alive with an empty payload. Sent while no video is flowing (encoder stalled or being
+    // recreated) so the client's read timeout does not fire and trigger a reconnect storm.
+    public const byte Ping = 0x30;
 }
 
 public static class Codec
@@ -93,6 +97,11 @@ public static class Protocol
         stream.Write(header);
         stream.Write(meta);
         stream.Write(bgra);
+    }
+
+    public static void WritePing(NetworkStream stream)
+    {
+        WritePacket(stream, PacketType.Ping, ReadOnlySpan<byte>.Empty);
     }
 
     public static HelloPacket ParseHello(ReadOnlySpan<byte> payload)

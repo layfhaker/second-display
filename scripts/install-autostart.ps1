@@ -50,9 +50,8 @@ try {
         -RunLevel Highest `
         -LogonType Interactive
 
-    # Run via a hidden PowerShell wrapper so no console window flashes up at logon.
-    $wrapperArgs = "-NoProfile -WindowStyle Hidden -Command `"Start-Process -FilePath '$exePath' -ArgumentList '--auto' -WindowStyle Hidden`""
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $wrapperArgs
+    # Run executable directly so zero console window flashes up at logon.
+    $action = New-ScheduledTaskAction -Execute $exePath -Argument '--auto' -WorkingDirectory (Split-Path -Parent $exePath)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
