@@ -3,6 +3,10 @@
 //! A staged port of the C# host (`host/SecondDisplay.Host`). Both live side by side; the C# host
 //! remains the reference/working build while this one reaches parity.
 
+// Release builds use the Windows subsystem so no console window appears when the scheduled task
+// starts the host; debug builds keep the console for `--probe` / self-tests.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod adb;
 mod convert;
 mod device_readiness;
@@ -25,6 +29,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 fn main() {
+    // If we were launched from a console (development / --probe / self-tests), attach to it so
+    // `println!` reaches it. In release the binary is windows-subsystem, so without a parent
+    // console nothing is attached and no window is shown (the log file is the output).
+    unsafe {
+        let _ = windows::Win32::System::Console::AttachConsole(0xFFFF_FFFF); // ATTACH_PARENT_PROCESS
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // --probe: exercise monitor enumeration + adb without touching the log file, the single-instance
