@@ -190,36 +190,50 @@ pub struct Server {
     listener: TcpListener,
     clients: Mutex<Vec<Arc<ClientSession>>>,
     port: u16,
+    stop: Arc<AtomicBool>,
 }
 
 impl Server {
     pub fn new(port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
-        Ok(Self { listener, clients: Mutex::new(Vec::new()), port })
+        // Non-blocking so the accept loop can observe `stop` and exit, releasing the listener.
+        listener.set_nonblocking(true)?;
+        Ok(Self { listener, clients: Mutex::new(Vec::new()), port, stop: Arc::new(AtomicBool::new(false)) })
     }
 
     pub fn start(self: &Arc<Self>, capture_w: u32, capture_h: u32) {
         logline!("Server listening on 0.0.0.0:{}", self.port);
         let me = Arc::clone(self);
+        let stop = Arc::clone(&self.stop);
         std::thread::Builder::new()
             .name("TcpAccept".into())
             .spawn(move || {
-                for stream in me.listener.incoming() {
-                    let Ok(stream) = stream else { break };
-                    let _ = stream.set_nodelay(true);
-                    if let Some(session) = me.handshake(stream, capture_w, capture_h) {
-                        logline!("Client connected: {}", session.remote);
-                        me.clients.lock().unwrap().push(Arc::clone(&session));
-                        let recv = Arc::clone(&session);
-                        let send = Arc::clone(&session);
-                        std::thread::Builder::new()
-                            .name("ClientRecv".into())
-                            .spawn(move || recv.receive_loop())
-                            .ok();
-                        std::thread::Builder::new()
-                            .name("ClientSend".into())
-                            .spawn(move || send.send_loop())
-                            .ok();
+                while !stop.load(Ordering::SeqCst) {
+                    match me.listener.accept() {
+                        Ok((stream, _)) => {
+                            // On Windows an accepted socket inherits the listener's non-blocking
+                            // mode; force blocking or the session's reads fail instantly.
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_nodelay(true);
+                            if let Some(session) = me.handshake(stream, capture_w, capture_h) {
+                                logline!("Client connected: {}", session.remote);
+                                me.clients.lock().unwrap().push(Arc::clone(&session));
+                                let recv = Arc::clone(&session);
+                                let send = Arc::clone(&session);
+                                std::thread::Builder::new()
+                                    .name("ClientRecv".into())
+                                    .spawn(move || recv.receive_loop())
+                                    .ok();
+                                std::thread::Builder::new()
+                                    .name("ClientSend".into())
+                                    .spawn(move || send.send_loop())
+                                    .ok();
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
                     }
                 }
             })
@@ -328,6 +342,9 @@ impl Server {
     }
 
     pub fn dispose(&self) {
+        // Stop the accept loop so it drops its Arc<Server> and the listening socket is released
+        // (otherwise the next session's bind fails with WSAEADDRINUSE).
+        self.stop.store(true, Ordering::SeqCst);
         for c in self.clients.lock().unwrap().iter() {
             c.close();
         }
