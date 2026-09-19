@@ -8,8 +8,10 @@
 ;     accept / recv / send — decoding a real HELLO packet and answering with READY.
 ; M5: COM from scratch — CoInitializeEx, CreateDXGIFactory1, then hand-rolled vtable calls
 ;     (EnumAdapters1 / GetDesc / EnumOutputs / GetDesc / Release) to enumerate adapters/outputs.
+; M6: D3D11CreateDevice + IDXGIOutput1::DuplicateOutput + AcquireNextFrame, then copy the desktop
+;     texture into a staging texture, Map it and checksum the pixels.
 ;
-; Next: D3D11 device + DXGI Desktop Duplication; then D3D11 VideoProcessor and Media Foundation HEVC.
+; Next: D3D11 VideoProcessor (BGRA->NV12) and Media Foundation HEVC, then the orchestrator.
 
 option casemap:none
 
@@ -75,6 +77,7 @@ EXTERN closesocket:PROC
 EXTERN CoInitializeEx:PROC
 EXTERN CoUninitialize:PROC
 EXTERN CreateDXGIFactory1:PROC
+EXTERN D3D11CreateDevice:PROC
 
 .data
 szLocal   db "LOCALAPPDATA", 0
@@ -125,6 +128,46 @@ szRectX    db "    x=", 0
 szRectY    db "    y=", 0
 szDxgiDone db "DXGI probe done", 13, 10, 0
 
+; IID_IDXGIOutput1 {00CDDEA8-939B-4B83-A340-A685226666CC}
+iidOutput1  db 0A8h,0DEh,0CDh,00h,9Bh,93h,83h,4Bh,0A3h,40h,0A6h,85h,22h,66h,66h,0CCh
+; IID_ID3D11Texture2D {6f15aaf2-d208-4e89-9ab4-489535d34f9c}
+iidTexture2D db 0F2h,0AAh,15h,6Fh,08h,0D2h,89h,4Eh,9Ah,0B4h,48h,95h,35h,0D3h,4Fh,9Ch
+
+featureLevels dd 0B000h, 0A100h     ; D3D_FEATURE_LEVEL_11_0, _10_1
+
+szDevFail  db "D3D11CreateDevice failed hr=", 0
+szQiFail   db "QueryInterface(IDXGIOutput1) failed hr=", 0
+szDupFail  db "DuplicateOutput failed hr=", 0
+szAcqFail  db "AcquireNextFrame failed hr=", 0
+szCapW     db "capture width=", 0
+szCapH     db "capture height=", 0
+szRowPitch db "capture rowpitch=", 0
+szChecksum db "capture checksum=", 0
+szCapOk    db "capture frame ok", 13, 10, 0
+szCapSrc   db "capture source: ", 0
+szNoDup    db "no duplicable output found on any adapter", 13, 10, 0
+szAttached db "    attached=", 0
+szSameAd   db "    device adapter matches", 13, 10, 0
+szDiffAd   db "    DEVICE ADAPTER MISMATCH", 13, 10, 0
+szDevPtr   db "    pDevice=", 0
+szCtxPtr   db "    pContext=", 0
+szQiDevHr  db "    QI(IDXGIDevice) hr=", 0
+szGetAdHr  db "    GetAdapter hr=", 0
+szDevAdVnd db "    device adapter vendor=", 0
+szDevAdDev db "    device adapter device=", 0
+szQiD11Hr  db "    QI(ID3D11Device) on pDevice hr=", 0
+szDevLevel db "    device feature level=", 0
+szOutPtr   db "    pOutput=", 0
+szOut1Ptr  db "    pOutput1=", 0
+szModeHr   db "    GetDisplayModeList1 hr=", 0
+szNumModes db "    mode count=", 0
+
+; IID_ID3D11Device {db6f6ddb-ac77-4e88-8253-819df9bbf140} — first three fields little-endian
+iidD3D11Device db 0DBh,6Dh,6Fh,0DBh,77h,0ACh,88h,4Eh,82h,53h,81h,9Dh,0F9h,0BBh,0F1h,40h
+
+; IID_IDXGIDevice {54ec77fa-1377-44e6-8c32-88fd5f44c84c}
+iidDxgiDevice db 0FAh,77h,0ECh,54h,77h,13h,0E6h,44h,8Ch,32h,88h,0FDh,5Fh,44h,0C8h,4Ch
+
 ; SECURITY_ATTRIBUTES { nLength=24, lpSecurityDescriptor=NULL, bInheritHandle=TRUE }
 saBuf     dd 24
           dd 0                    ; padding
@@ -165,6 +208,27 @@ pOutput   dq ?                 ; IDXGIOutput*
 adapterDesc db 320 dup(?)      ; DXGI_ADAPTER_DESC
 outDesc   db 128 dup(?)        ; DXGI_OUTPUT_DESC
 ansiBuf   db 320 dup(?)        ; wide -> ansi scratch
+
+pDevice   dq ?                 ; ID3D11Device*
+pContext  dq ?                 ; ID3D11DeviceContext*
+pDxgiDevice dq ?               ; IDXGIDevice* (from pDevice, for the adapter check)
+pDevAdapter dq ?               ; IDXGIAdapter* behind pDevice
+pProbe11    dq ?               ; ID3D11Device* QI'd from pDevice (identity check)
+devLevel  dd ?                 ; D3D_FEATURE_LEVEL the device was created at
+numModes  dd ?                 ; DXGI mode count reported by GetDisplayModeList1
+devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
+pOutput1  dq ?                 ; IDXGIOutput1*
+pDup      dq ?                 ; IDXGIOutputDuplication*
+pRes      dq ?                 ; IDXGIResource*
+pTex      dq ?                 ; ID3D11Texture2D* (the acquired desktop frame)
+pStaging  dq ?                 ; ID3D11Texture2D* (CPU-readable staging copy)
+frameInfo db 64 dup(?)         ; DXGI_OUTDUPL_FRAME_INFO
+texDesc   db 48 dup(?)         ; D3D11_TEXTURE2D_DESC
+mapped    db 16 dup(?)         ; D3D11_MAPPED_SUBRESOURCE
+capW      dd ?
+capH      dd ?
+rowPitch  dd ?
+checksum  dd ?
 
 .code
 
@@ -746,6 +810,456 @@ probe_done:
     ret
 run_dxgi_probe endp
 
+; Desktop Duplication probe: D3D11 device on adapter 0, DuplicateOutput on output 0,
+; AcquireNextFrame, CopyResource into a CPU-readable staging texture, Map and checksum a row.
+;
+; vtable slots used (verified against dxgi.h / dxgi1_2.h / d3d11.h in the Windows SDK):
+;   IUnknown::QueryInterface = 0, Release = 16,
+;   IDXGIAdapter::EnumOutputs = 56, GetDesc = 64, IDXGIFactory1::EnumAdapters1 = 96,
+;   IDXGIDevice::GetAdapter = 56, IDXGIOutput::GetDesc = 56,
+;   IDXGIOutput1::DuplicateOutput = 176                       <-- 22nd slot, not 17!
+;   IDXGIOutputDuplication::AcquireNextFrame = 64, ReleaseFrame = 112,
+;   ID3D11Device::CreateTexture2D = 40,
+;   ID3D11DeviceContext::Map = 112, Unmap = 120, CopyResource = 376.
+run_capture_probe proc
+    push    r12
+    push    r13
+    sub     rsp, 88h
+
+    mov     qword ptr [pFactory], 0
+    mov     qword ptr [pAdapter], 0
+    mov     qword ptr [pOutput], 0
+    mov     qword ptr [pOutput1], 0
+    mov     qword ptr [pDevice], 0
+    mov     qword ptr [pContext], 0
+    mov     qword ptr [pDxgiDevice], 0
+    mov     qword ptr [pDevAdapter], 0
+    mov     qword ptr [pDup], 0
+    mov     qword ptr [pRes], 0
+    mov     qword ptr [pTex], 0
+    mov     qword ptr [pStaging], 0
+
+    ; DXGI/D3D11 need no COM apartment of ours, and the working Rust path does not initialise one
+    ; either — DuplicateOutput fails with E_NOINTERFACE when this thread sits in an MTA.
+
+    ; ---- factory ----
+    lea     rcx, iidFactory1
+    lea     rdx, pFactory
+    call    CreateDXGIFactory1
+    test    eax, eax
+    jnz     cap_cleanup
+
+    xor     r13d, r13d             ; adapter index
+
+cp_adapt_loop:
+    mov     rcx, pFactory
+    mov     rax, [rcx]
+    mov     edx, r13d
+    lea     r8, pAdapter
+    call    qword ptr [rax+96]     ; EnumAdapters1
+    test    eax, eax
+    jnz     cap_nodup
+
+    mov     rcx, pAdapter
+    mov     rax, [rcx]
+    lea     rdx, adapterDesc
+    call    qword ptr [rax+64]     ; IDXGIAdapter::GetDesc (we need its LUID below)
+
+    ; ---- D3D11CreateDevice(NULL, HARDWARE, NULL, BGRA_SUPPORT, levels, 1, SDK 7, ...) ----
+    xor     ecx, ecx               ; default adapter, like the Microsoft sample
+    mov     edx, 1                 ; D3D_DRIVER_TYPE_HARDWARE
+    xor     r8d, r8d
+    mov     r9d, 20h               ; D3D11_CREATE_DEVICE_BGRA_SUPPORT
+    lea     rax, featureLevels
+    mov     qword ptr [rsp+20h], rax
+    mov     dword ptr [rsp+28h], 1
+    mov     dword ptr [rsp+30h], 7 ; D3D11_SDK_VERSION
+    lea     rax, pDevice
+    mov     qword ptr [rsp+38h], rax
+    lea     rax, devLevel
+    mov     qword ptr [rsp+40h], rax
+    lea     rax, pContext
+    mov     qword ptr [rsp+48h], rax
+    call    D3D11CreateDevice
+    test    eax, eax
+    jz      cp_device_ok
+    mov     edx, eax
+    lea     rcx, szDevFail
+    call    emit_num
+    jmp     cp_next_adapter
+
+cp_device_ok:
+    lea     rcx, szDevPtr
+    mov     edx, dword ptr [pDevice]
+    call    emit_num
+    lea     rcx, szCtxPtr
+    mov     edx, dword ptr [pContext]
+    call    emit_num
+
+    ; ---- is the device a real D3D11 device, and on which adapter? ----
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, iidDxgiDevice
+    lea     r8, pDxgiDevice
+    call    qword ptr [rax+0]      ; QueryInterface(IDXGIDevice)
+    test    eax, eax
+    jz      cp_have_dxgidev
+    mov     edx, eax
+    lea     rcx, szQiDevHr
+    call    emit_num
+    jmp     cp_adapter_checked
+
+cp_have_dxgidev:
+    mov     rcx, pDxgiDevice
+    mov     rax, [rcx]
+    lea     rdx, pDevAdapter
+    call    qword ptr [rax+56]     ; IDXGIDevice::GetAdapter
+    test    eax, eax
+    jz      cp_have_devadapter
+    mov     edx, eax
+    lea     rcx, szGetAdHr
+    call    emit_num
+    jmp     cp_adapter_checked
+
+cp_have_devadapter:
+    mov     rcx, pDevAdapter
+    mov     rax, [rcx]
+    lea     rdx, devDesc
+    call    qword ptr [rax+64]     ; IDXGIAdapter::GetDesc
+    lea     rcx, szDevAdVnd
+    mov     edx, dword ptr [devDesc+256]
+    call    emit_num
+    lea     rcx, szDevAdDev
+    mov     edx, dword ptr [devDesc+260]
+    call    emit_num
+    mov     eax, dword ptr [adapterDesc+296]    ; LUID.LowPart
+    cmp     eax, dword ptr [devDesc+296]
+    jne     cp_adapter_diff
+    mov     eax, dword ptr [adapterDesc+300]    ; LUID.HighPart
+    cmp     eax, dword ptr [devDesc+300]
+    jne     cp_adapter_diff
+    lea     rcx, szSameAd
+    call    emit_z
+    jmp     cp_adapter_checked
+cp_adapter_diff:
+    lea     rcx, szDiffAd
+    call    emit_z
+cp_adapter_checked:
+    ; ---- is the object behind pDevice really an ID3D11Device? ----
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, iidD3D11Device
+    lea     r8, pProbe11
+    call    qword ptr [rax+0]      ; QueryInterface(ID3D11Device)
+    mov     edx, eax
+    lea     rcx, szQiD11Hr
+    call    emit_num
+    mov     rcx, pProbe11
+    call    rel_if
+    mov     qword ptr [pProbe11], 0
+
+    lea     rcx, szDevLevel
+    mov     edx, devLevel
+    call    emit_num
+
+    xor     r12d, r12d             ; output index
+
+cp_out_loop:
+    mov     rcx, pAdapter
+    mov     rax, [rcx]
+    mov     edx, r12d
+    lea     r8, pOutput
+    call    qword ptr [rax+56]     ; EnumOutputs
+    test    eax, eax
+    jnz     cp_next_adapter
+
+    mov     rcx, pOutput
+    mov     rax, [rcx]
+    lea     rdx, outDesc
+    call    qword ptr [rax+56]     ; GetDesc
+    lea     rcx, szOutName
+    call    emit_z
+    lea     rcx, ansiBuf
+    lea     rdx, outDesc           ; WCHAR DeviceName[32]
+    call    wc2a
+    lea     rcx, ansiBuf
+    call    emit_z
+
+    lea     rcx, szAttached
+    mov     edx, dword ptr [outDesc+80]   ; AttachedToDesktop
+    call    emit_num
+
+    ; output size from DXGI_OUTPUT_DESC::DesktopCoordinates
+    mov     eax, dword ptr [outDesc+72]
+    sub     eax, dword ptr [outDesc+64]
+    mov     capW, eax
+    mov     eax, dword ptr [outDesc+76]
+    sub     eax, dword ptr [outDesc+68]
+    mov     capH, eax
+
+    ; ---- IDXGIOutput1 (a prerequisite for DuplicateOutput) ----
+    mov     rcx, pOutput
+    mov     rax, [rcx]
+    lea     rdx, iidOutput1
+    lea     r8, pOutput1
+    call    qword ptr [rax+0]      ; QueryInterface
+    test    eax, eax
+    jz      cp_have_output1
+    mov     edx, eax
+    lea     rcx, szQiFail
+    call    emit_num
+    jmp     cp_out_next
+
+cp_have_output1:
+    ; ---- prove pOutput1 really is an IDXGIOutput1: slot 15 = GetDisplayModeList1 ----
+    lea     rcx, szOutPtr
+    mov     edx, dword ptr [pOutput]
+    call    emit_num
+    lea     rcx, szOut1Ptr
+    mov     edx, dword ptr [pOutput1]
+    call    emit_num
+    mov     dword ptr [numModes], 0
+    mov     rcx, pOutput1
+    mov     rax, [rcx]
+    mov     edx, 87                ; DXGI_FORMAT_B8G8R8A8_UNORM
+    xor     r8d, r8d
+    lea     r9, numModes
+    mov     qword ptr [rsp+20h], 0 ; pDesc = NULL -> just count the modes
+    call    qword ptr [rax+120]
+    mov     edx, eax
+    lea     rcx, szModeHr
+    call    emit_num
+    lea     rcx, szNumModes
+    mov     edx, numModes
+    call    emit_num
+
+    ; ---- DuplicateOutput(device, &dup) ----
+    mov     rcx, pOutput1
+    mov     rax, [rcx]
+    mov     rdx, pDevice
+    lea     r8, pDup
+    call    qword ptr [rax+176]    ; DuplicateOutput (slot 22 — see dxgi1_2.h)
+    test    eax, eax
+    jz      cp_have_dup
+    mov     edx, eax
+    lea     rcx, szDupFail
+    call    emit_num
+    lea     rcx, ansiBuf
+    call    emit_z
+    jmp     cp_out_next
+
+cp_have_dup:
+    lea     rcx, szCapSrc
+    call    emit_z
+    lea     rcx, ansiBuf
+    call    emit_z
+    lea     rcx, szCrLf
+    call    emit_z
+
+    ; ---- AcquireNextFrame(5000, &frameInfo, &resource) ----
+    mov     rcx, pDup
+    mov     rax, [rcx]
+    mov     edx, 5000
+    lea     r8, frameInfo
+    lea     r9, pRes
+    call    qword ptr [rax+64]
+    test    eax, eax
+    jnz     cap_acq_fail
+
+    ; ---- the acquired IDXGIResource is an ID3D11Texture2D ----
+    mov     rcx, pRes
+    mov     rax, [rcx]
+    lea     rdx, iidTexture2D
+    lea     r8, pTex
+    call    qword ptr [rax+0]
+    test    eax, eax
+    jnz     cap_acq_fail
+
+    ; ---- staging texture: the CPU-readable BGRA copy ----
+    lea     r10, texDesc
+    mov     eax, capW
+    mov     dword ptr [r10], eax
+    mov     eax, capH
+    mov     dword ptr [r10+4], eax
+    mov     dword ptr [r10+8], 1        ; MipLevels
+    mov     dword ptr [r10+12], 1       ; ArraySize
+    mov     dword ptr [r10+16], 87      ; DXGI_FORMAT_B8G8R8A8_UNORM
+    mov     dword ptr [r10+20], 1       ; SampleDesc.Count
+    mov     dword ptr [r10+24], 0       ; SampleDesc.Quality
+    mov     dword ptr [r10+28], 3       ; D3D11_USAGE_STAGING
+    mov     dword ptr [r10+32], 0       ; BindFlags
+    mov     dword ptr [r10+36], 20000h  ; D3D11_CPU_ACCESS_READ
+    mov     dword ptr [r10+40], 0       ; MiscFlags
+
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, texDesc
+    xor     r8d, r8d
+    lea     r9, pStaging
+    call    qword ptr [rax+40]     ; CreateTexture2D
+    test    eax, eax
+    jnz     cap_cleanup
+
+    ; ---- CopyResource(dst = staging, src = acquired) ----
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pStaging
+    mov     r8, pTex
+    call    qword ptr [rax+376]
+
+    ; ---- Map(staging, 0, D3D11_MAP_READ, 0, &mapped) ----
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pStaging
+    xor     r8d, r8d
+    mov     r9d, 1
+    mov     dword ptr [rsp+20h], 0         ; MapFlags
+    lea     r10, mapped
+    mov     qword ptr [rsp+28h], r10       ; pMappedResource (5th arg, NOT [rsp+20h])
+    call    qword ptr [rax+112]
+    test    eax, eax
+    jnz     cap_cleanup
+
+    ; ---- checksum the whole mapped frame: proof that real pixels came back ----
+    mov     r11, qword ptr [mapped]        ; pData
+    mov     r10d, dword ptr [mapped+8]     ; RowPitch
+    mov     rowPitch, r10d
+    mov     eax, r10d
+    imul    eax, dword ptr [capH]          ; total bytes = RowPitch * Height
+    mov     r10d, eax
+    xor     edx, edx
+    xor     eax, eax
+cap_sum:
+    cmp     eax, r10d
+    jae     cap_sum_done
+    movzx   r8d, byte ptr [r11+rax]
+    add     edx, r8d
+    inc     eax
+    jmp     cap_sum
+cap_sum_done:
+    mov     checksum, edx
+
+    lea     rcx, szCapW
+    mov     edx, capW
+    call    emit_num
+    lea     rcx, szCapH
+    mov     edx, capH
+    call    emit_num
+    lea     rcx, szRowPitch
+    mov     edx, rowPitch
+    call    emit_num
+    lea     rcx, szChecksum
+    mov     edx, checksum
+    call    emit_num
+    lea     rcx, szCapOk
+    call    emit_z
+
+    ; ---- Unmap(staging, 0) ----
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pStaging
+    xor     r8d, r8d
+    call    qword ptr [rax+120]
+    jmp     cap_cleanup
+
+cp_out_next:
+    mov     rcx, pOutput1
+    call    rel_if
+    mov     qword ptr [pOutput1], 0
+    mov     rcx, pOutput
+    call    rel_if
+    mov     qword ptr [pOutput], 0
+    inc     r12d
+    jmp     cp_out_loop
+
+cp_next_adapter:
+    mov     rcx, pDxgiDevice
+    call    rel_if
+    mov     qword ptr [pDxgiDevice], 0
+    mov     rcx, pDevAdapter
+    call    rel_if
+    mov     qword ptr [pDevAdapter], 0
+    mov     rcx, pOutput1
+    call    rel_if
+    mov     qword ptr [pOutput1], 0
+    mov     rcx, pOutput
+    call    rel_if
+    mov     qword ptr [pOutput], 0
+    mov     rcx, pDevice
+    call    rel_if
+    mov     qword ptr [pDevice], 0
+    mov     rcx, pContext
+    call    rel_if
+    mov     qword ptr [pContext], 0
+    mov     rcx, pAdapter
+    call    rel_if
+    mov     qword ptr [pAdapter], 0
+    inc     r13d
+    jmp     cp_adapt_loop
+
+cap_nodup:
+    lea     rcx, szNoDup
+    call    emit_z
+    jmp     cap_cleanup
+
+cap_acq_fail:
+    mov     edx, eax
+    lea     rcx, szAcqFail
+    call    emit_num
+
+cap_cleanup:
+    mov     rcx, pRes
+    call    rel_if
+    mov     qword ptr [pRes], 0
+    mov     rcx, pTex
+    call    rel_if
+    mov     qword ptr [pTex], 0
+    mov     rcx, pStaging
+    call    rel_if
+    mov     qword ptr [pStaging], 0
+    mov     rcx, pDup
+    test    rcx, rcx
+    jz      cap_no_dup
+    mov     rax, [rcx]
+    call    qword ptr [rax+112]    ; ReleaseFrame (no-op if nothing was acquired)
+cap_no_dup:
+    mov     rcx, pDup
+    call    rel_if
+    mov     rcx, pContext
+    call    rel_if
+    mov     rcx, pDxgiDevice
+    call    rel_if
+    mov     rcx, pDevAdapter
+    call    rel_if
+    mov     rcx, pDevice
+    call    rel_if
+    mov     rcx, pOutput1
+    call    rel_if
+    mov     rcx, pOutput
+    call    rel_if
+    mov     rcx, pAdapter
+    call    rel_if
+    mov     rcx, pFactory
+    call    rel_if
+
+    add     rsp, 88h
+    pop     r13
+    pop     r12
+    ret
+run_capture_probe endp
+
+; Release a COM interface if the pointer is non-null: rcx = pointer. Clobbers rax/rdx.
+rel_if proc
+    sub     rsp, 8
+    test    rcx, rcx
+    jz      rel_if_done
+    mov     rax, [rcx]
+    call    qword ptr [rax+16]     ; IUnknown::Release
+rel_if_done:
+    add     rsp, 8
+    ret
+rel_if endp
+
 ; int mainCRTStartup(void)
 mainCRTStartup proc
     sub     rsp, 38h
@@ -822,6 +1336,9 @@ mainCRTStartup proc
 
     ; ---- TCP handshake self-test ----
     call    run_tcp_selftest
+
+    ; ---- Desktop Duplication capture probe ----
+    call    run_capture_probe
 
     ; ---- DXGI adapter/output probe ----
     call    run_dxgi_probe
