@@ -359,8 +359,10 @@ impl AdbLauncher {
         Self { adb_path, serial }
     }
     fn launch(&self) {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new(&self.adb_path)
             .args(["-s", &self.serial, "shell", "am", "start", "-n", "com.seconddisplay.client/.MainActivity"])
+            .creation_flags(crate::adb::CREATE_NO_WINDOW)
             .status();
     }
 }

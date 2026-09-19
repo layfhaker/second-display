@@ -2,11 +2,15 @@
 
 use crate::device_readiness::DeviceReadiness;
 use crate::logline;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// CREATE_NO_WINDOW: don't flash a console window for every spawned adb/pnputil/powershell process.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const DEVICES_TIMEOUT_MS: u64 = 3_000;
@@ -253,6 +257,7 @@ pub fn run_process(file: &str, args: &[&str], timeout_ms: u64) -> CommandResult 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {
         Ok(c) => c,
