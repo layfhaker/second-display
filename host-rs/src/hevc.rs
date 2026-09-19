@@ -10,14 +10,14 @@
 use crate::logline;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use windows::core::{GUID, HRESULT, Interface};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEventGenerator,
     IMFMediaType, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, MFTEnumEx,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFStartup, MFTEnumEx,
     MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
@@ -35,6 +35,20 @@ const METRANSFORM_NEED_INPUT: u32 = 601;
 const METRANSFORM_HAVE_OUTPUT: u32 = 602;
 const MFVIDEO_INTERLACE_PROGRESSIVE: u32 = 2;
 const IID_ID3D11TEXTURE2D: GUID = GUID::from_u128(0x6f15aaf2_d208_4e89_9ab4_489535d34f9c);
+
+/// How long `dispose` waits for the event thread before detaching it.
+const TEARDOWN_WAIT: Duration = Duration::from_millis(1500);
+
+/// The Media Foundation platform is process-wide. Start it once and never shut it down per encoder:
+/// a `MFShutdown` on every recreate blocks while other MF work is in flight, which used to wedge the
+/// streaming thread for good (black screen, no recovery) whenever an encoder faulted.
+static MF_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+fn mf_startup() -> Result<(), String> {
+    MF_INIT
+        .get_or_init(|| unsafe { MFStartup(0x0002_0070, 0).map_err(|e| e.to_string()) })
+        .clone()
+}
 
 fn pack(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64
@@ -115,9 +129,7 @@ impl HevcEncoder {
         d3d_device: Option<&windows::Win32::Graphics::Direct3D11::ID3D11Device>,
         on_frame: Arc<dyn Fn(&[u8], i64, bool) + Send + Sync>,
     ) -> Result<Self, String> {
-        unsafe {
-            MFStartup(0x0002_0070, 0).map_err(|e| e.to_string())?;
-        }
+        mf_startup()?;
 
         let out_info = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MEDIATYPE_Video,
@@ -263,10 +275,18 @@ impl HevcEncoder {
         self.running.store(false, Ordering::SeqCst);
         self.queue.wake();
         if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-        unsafe {
-            let _ = MFShutdown();
+            let deadline = std::time::Instant::now() + TEARDOWN_WAIT;
+            while !j.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if j.is_finished() {
+                let _ = j.join();
+            } else {
+                logline!(
+                    "Encoder event thread still busy after {}ms — detaching it",
+                    TEARDOWN_WAIT.as_millis()
+                );
+            }
         }
     }
 }

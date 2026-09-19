@@ -149,21 +149,22 @@ impl StreamingSession {
             // Watchdog: recreate a faulted or wedged encoder (hard stalls never self-recover).
             if let Some(enc) = &encoder {
                 if enc.faulted() || last_output.elapsed() > Duration::from_millis(6000) {
-                    logline!(
-                        "Encoder unhealthy (faulted={}, idle={}ms) — recreating",
-                        enc.faulted(),
-                        last_output.elapsed().as_millis()
-                    );
+                    let faulted = enc.faulted();
+                    let idle = last_output.elapsed().as_millis();
+                    logline!("Encoder unhealthy (faulted={faulted}, idle={idle}ms) — releasing");
                     encoder = None;
                     converter = None;
+                    logline!("Encoder released — rebuilding");
                 }
             }
 
             // Fresh keyframe for a newly joined client.
             let cc = self.server.client_count();
             if cc > last_client_count && encoder.is_some() {
+                logline!("New client — releasing encoder for a fresh keyframe");
                 encoder = None;
                 converter = None;
+                logline!("Old encoder released");
             }
             last_client_count = cc;
 
