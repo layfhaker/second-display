@@ -2,22 +2,21 @@
   Build a release installer for SecondDisplay.
 
   Steps:
-    1. dotnet publish the host (self-contained win-x64 by default) -> build\staging\host
-    2. build the Android client APK (gradle :app:assembleDebug)   -> build\staging\android
-    3. copy platform-tools (adb + 2 dll)                          -> build\staging\platform-tools
-    4. compile the Inno Setup installer                           -> releases\SecondDisplay-Setup-<ver>.exe
+    1. cargo build --release the Rust host            -> build\staging\host\SecondDisplay.Host.exe
+    2. build the Android client APK (gradle)          -> build\staging\android
+    3. copy platform-tools (adb + 2 dll)              -> build\staging\platform-tools
+    4. compile the Inno Setup installers (all/ru/en)  -> releases\SecondDisplay-Setup-<ver>*.exe
 
-  Requires: .NET SDK, JDK 17 + Android SDK + Gradle, and Inno Setup 6 (winget install JRSoftware.InnoSetup).
+  Requires: Rust toolchain, JDK 17 + Android SDK + Gradle, and Inno Setup 6.
 
   Usage:
     powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
-    powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Version 1.2.0 -SelfContained:$false
+    powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Version 1.2.0
 #>
 [CmdletBinding()]
 param(
     [string]$Version = '',
     [string]$Configuration = 'Release',
-    [bool]$SelfContained = $true,
     [string]$SdkDir = '',
     [string]$GradleExe = '',
     [string]$JavaHome = '',
@@ -34,7 +33,6 @@ function Resolve-Tool([string]$explicit, [string[]]$candidates) {
 
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $androidProj = Join-Path $root 'android\SecondDisplay'
-$hostProj = Join-Path $root 'host\SecondDisplay.Host\SecondDisplay.Host.csproj'
 $staging = Join-Path $root 'build\staging'
 $releases = Join-Path $root 'releases'
 
@@ -47,12 +45,11 @@ if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
 New-Item -ItemType Directory -Force -Path `
     (Join-Path $staging 'host'), (Join-Path $staging 'android'), (Join-Path $staging 'platform-tools'), $releases | Out-Null
 
-# ---------------------------------------------------------------- 1) host publish
-Write-Host "[1/4] publishing host..." -ForegroundColor Cyan
-$pubArgs = @('publish', $hostProj, '-c', $Configuration, '-o', (Join-Path $staging 'host'), '--nologo')
-if ($SelfContained) { $pubArgs += @('-r', 'win-x64', '--self-contained', 'true') }
-& dotnet @pubArgs
-if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
+# ---------------------------------------------------------------- 1) host (Rust)
+Write-Host "[1/4] building Rust host (cargo build --release)..." -ForegroundColor Cyan
+& cargo build --release --manifest-path (Join-Path $root 'host-rs\Cargo.toml')
+if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+Copy-Item (Join-Path $root 'host-rs\target\release\seconddisplay-host.exe') (Join-Path $staging 'host\SecondDisplay.Host.exe') -Force
 
 # ---------------------------------------------------------------- 2) android apk
 Write-Host "[2/4] building android client APK..." -ForegroundColor Cyan

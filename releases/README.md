@@ -38,14 +38,14 @@ powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Version 1.0.
 без них — один мультиязычный), все кладутся в `releases/`.
 
 Что делает `scripts\build-release.ps1`:
-1. `dotnet publish` хоста (self-contained win-x64 по умолчанию) → `build\staging\host`;
+1. `cargo build --release` Rust-хоста (`host-rs`) → `build\staging\host\SecondDisplay.Host.exe`;
 2. собирает Android-клиент (Gradle `:app:assembleDebug`) → `build\staging\android\app-debug.apk`;
 3. кладёт `adb.exe` + 2 DLL в `build\staging\platform-tools`;
-4. компилирует Inno Setup-скрипт `installer\SecondDisplay.iss` → `releases\SecondDisplay-Setup-<ver>.exe`.
+4. компилирует Inno Setup-скрипт `installer\SecondDisplay.iss` → `releases\SecondDisplay-Setup-<ver>*.exe`.
 
-Требования: .NET SDK, JDK 17 + Android SDK + Gradle, Inno Setup 6
+Требования: Rust toolchain, JDK 17 + Android SDK + Gradle, Inno Setup 6
 (`winget install JRSoftware.InnoSetup`). Пути ищутся автоматически; можно задать
-`-SdkDir`, `-JavaHome`, `-GradleExe`, `-Iscc`, `-SelfContained:$false`.
+`-SdkDir`, `-JavaHome`, `-GradleExe`, `-Iscc`.
 
 Что делает установщик (`installer\SecondDisplay.iss` + `installer\seconddisplay-setup.ps1`):
 - ставит хост в **`%ProgramFiles%\SecondDisplay`** (x64);

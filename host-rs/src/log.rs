@@ -60,15 +60,13 @@ pub fn init(path: &PathBuf) {
 }
 
 fn timestamp() -> String {
-    // HH:MM:SS.mmm local time via the system clock.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let ms = now.subsec_millis();
-    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+    // Local wall-clock time (matches the C# host's log format).
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let t = unsafe { GetLocalTime() };
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
 }
 
 /// Print + log one line. Use everywhere instead of `println!`.
