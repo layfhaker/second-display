@@ -17,6 +17,7 @@ public sealed class Orchestrator
     private const int MissingPollsBeforeTeardown = 2; // debounce adb list blips
     private const int SessionShutdownTimeoutMs = 1000; // fast shutdown
     private const int StableConnectPolls = 2; // ~2s of uninterrupted readiness
+    private const int MaxNoClientPolls = 12; // ~12s of reverse+relaunch attempts before giving up
 
     private readonly FpsOptions _opts;
     private readonly AdbController _adb;
@@ -35,6 +36,15 @@ public sealed class Orchestrator
             Console.WriteLine($"[orchestrator] Device {serial} waiting: {reason}");
         }
     }
+
+    /// <summary>
+    /// A readiness probe can fail because adb itself timed out (server hiccup, USB re-enumeration),
+    /// not because the tablet is actually locked/asleep. Such failures must not be treated as a
+    /// real device-state problem (they would tear a perfectly healthy session down).
+    /// </summary>
+    private static bool IsAdbTransientFailure(DeviceReadiness readiness) =>
+        readiness.Reason.Contains("adb shell command failed", StringComparison.OrdinalIgnoreCase) ||
+        readiness.Reason.Contains("Readiness check failed", StringComparison.OrdinalIgnoreCase);
 
     public Orchestrator(FpsOptions opts, AdbController adb, VddController vdd)
     {
@@ -298,7 +308,7 @@ public sealed class Orchestrator
             {
                 consecutiveMissing = 0;
                 var readiness = _adb.GetDeviceReadiness(serial);
-                if (!readiness.IsReady)
+                if (!readiness.IsReady && !IsAdbTransientFailure(readiness))
                 {
                     Console.WriteLine($"[orchestrator] Tablet {serial} is no longer ready ({readiness.Reason}) — aborting connection.");
                     return false;
@@ -322,6 +332,10 @@ public sealed class Orchestrator
     /// <summary>Polls while streaming: exits on ct cancel, session completion, debounced device loss, or device unready.</summary>
     private void RunStreamingLoop(string serial, StreamingSession session, Task sessionTask, CancellationToken ct)
     {
+        // Never let adb auto-restart while streaming: kill-server tears down the adb reverse tunnel
+        // and kills the connected client (transient hiccup -> black screen).
+        _adb.AutoRestartEnabled = false;
+
         int consecutiveMissing = 0;
         int consecutiveUnready = 0;
         int noClientCount = 0;
@@ -349,21 +363,38 @@ public sealed class Orchestrator
 
             if (!devices.Contains(serial))
             {
-                consecutiveMissing++;
-                Console.WriteLine($"[orchestrator] Device {serial} missing from adb list ({consecutiveMissing}/{MissingPollsBeforeTeardown})");
-                if (consecutiveMissing >= MissingPollsBeforeTeardown)
+                // A brief adb hiccup (server timeout / USB re-enumeration) can remove the device
+                // from the list while the TCP tunnel and the running client are still fine. Only
+                // treat a missing device as fatal when nothing is connected either.
+                if (session.HasClients)
                 {
-                    Console.WriteLine($"[orchestrator] Device {serial} confirmed gone — tearing down.");
-                    return;
+                    consecutiveMissing = 0;
+                    Console.WriteLine($"[orchestrator] Device {serial} missing from adb list but the stream is alive — ignoring (transient adb blip)");
+                }
+                else
+                {
+                    consecutiveMissing++;
+                    Console.WriteLine($"[orchestrator] Device {serial} missing from adb list ({consecutiveMissing}/{MissingPollsBeforeTeardown})");
+                    if (consecutiveMissing >= MissingPollsBeforeTeardown)
+                    {
+                        Console.WriteLine($"[orchestrator] Device {serial} confirmed gone — tearing down.");
+                        return;
+                    }
                 }
             }
             else
             {
                 consecutiveMissing = 0;
 
-                // Check device readiness: if user locked the screen or switched USB away from MTP
+                // Check device readiness: if the user locked the screen or switched USB away from MTP.
+                // An adb-timeout failure is NOT a real unready state — don't count it, or a flaky adb
+                // server would tear down a perfectly healthy session.
                 var readiness = _adb.GetDeviceReadiness(serial);
-                if (!readiness.IsReady)
+                if (readiness.IsReady || IsAdbTransientFailure(readiness))
+                {
+                    consecutiveUnready = 0;
+                }
+                else
                 {
                     consecutiveUnready++;
                     Console.WriteLine($"[orchestrator] Device {serial} not ready ({readiness.Reason}) ({consecutiveUnready}/{MissingPollsBeforeTeardown})");
@@ -373,12 +404,10 @@ public sealed class Orchestrator
                         return;
                     }
                 }
-                else
-                {
-                    consecutiveUnready = 0;
-                }
 
-                // Check client connection state
+                // Client connection state. Keep re-applying the reverse tunnel + relaunching the
+                // client for a while: the drop is often a transient adb/USB glitch, and a full
+                // teardown (VDD off/on) costs several seconds of black.
                 if (!session.HasClients)
                 {
                     noClientCount++;
@@ -386,14 +415,19 @@ public sealed class Orchestrator
                     {
                         Console.WriteLine("[orchestrator] Client disconnected while tablet is connected. Checking Android crash logs...");
                         _adb.DumpCrashLogs(serial);
+                    }
 
-                        if (readiness.IsReady)
+                    if (noClientCount <= MaxNoClientPolls)
+                    {
+                        if (readiness.IsReady || IsAdbTransientFailure(readiness))
                         {
-                            Console.WriteLine("[orchestrator] Tablet still awake — relaunching client app...");
+                            Console.WriteLine($"[orchestrator] Relaunching client ({noClientCount}/{MaxNoClientPolls})...");
+                            try { _adb.SetupReverse(serial); }
+                            catch (Exception ex) { Console.WriteLine($"[orchestrator] reverse retry failed: {ex.Message}"); }
                             _adb.LaunchClient(serial);
                         }
                     }
-                    else if (noClientCount >= 5) // ~5 seconds without reconnect
+                    else
                     {
                         Console.WriteLine("[orchestrator] Client did not reconnect — tearing down.");
                         return;
@@ -412,6 +446,9 @@ public sealed class Orchestrator
     private void Teardown(string serial, StreamingSession? session, CancellationTokenSource? sessionCts, Task? sessionTask, bool vddEnabled)
     {
         Console.WriteLine("[orchestrator] Tearing down...");
+
+        // Back to Passive: adb auto-restart is allowed again (no live tunnel to protect).
+        _adb.AutoRestartEnabled = true;
 
         if (sessionCts != null)
         {

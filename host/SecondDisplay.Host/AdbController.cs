@@ -23,6 +23,14 @@ public sealed class AdbController
     private DateTime _lastTimeoutRestart = DateTime.MinValue;
     private static readonly TimeSpan TimeoutRestartMinInterval = TimeSpan.FromSeconds(20);
 
+    /// <summary>
+    /// When false, adb-server auto-restarts are suppressed. Restarting the adb server tears down
+    /// the `adb reverse` tunnel and kills the connected client, so it must NOT happen while a
+    /// stream is active — doing so turned a transient adb hiccup into a dead client + black screen.
+    /// The orchestrator disables this during streaming and re-enables it in Passive.
+    /// </summary>
+    public bool AutoRestartEnabled { get; set; } = true;
+
     public AdbController(string? adbPathOverride = null, string package = "com.seconddisplay.client", int port = 27315)
     {
         _package = package;
@@ -220,6 +228,7 @@ public sealed class AdbController
 
     private void MaybeRestartForUnauthorized()
     {
+        if (!AutoRestartEnabled) return; // never during an active stream (would kill the tunnel)
         DateTime now = DateTime.Now;
         if (now - _lastUnauthorizedRestart < UnauthorizedRestartMinInterval)
             return; // already tried recently — give the tablet time to show the dialog
@@ -235,6 +244,7 @@ public sealed class AdbController
     /// </summary>
     private void MaybeRestartForTimeouts()
     {
+        if (!AutoRestartEnabled) return; // never during an active stream (would kill the tunnel)
         if (_consecutiveTimeouts < 3)
             return;
 

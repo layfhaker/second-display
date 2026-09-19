@@ -12,6 +12,12 @@ AttachConsole(-1);
 // not the DPI-virtualized one (otherwise only a corner of the screen is captured).
 DpiHelper.EnablePerMonitorDpiAwareness();
 
+// Run at High priority so the async HEVC MFT and the capture/encode loop are not starved when
+// the machine is busy — observed: a concurrent rustc build pegging all cores to 100% stalled the
+// encoder (ProcessOutput >1.7s) and starved adb, producing freezes/black frames.
+try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.High; }
+catch { /* not permitted — keep normal priority */ }
+
 if (args.Length > 0 && args[0] == "--probe-d3d11")
 {
     GpuProbe.Run(

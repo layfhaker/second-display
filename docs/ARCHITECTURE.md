@@ -70,11 +70,14 @@ IddCx UMDF, `UmdfLibraryVersion=2.25.0 + UmdfExtensions=IddCx0102`, hwid `Root\M
 WDDM display-only miniport на базе MS **KMDOD** (`driver/wds-tmp/video/KMDOD/`). dxgkrnl даёт
 `STATUS_NOT_SUPPORTED` для display-only на root-устройстве без ресурсов — для этого и сделан IddCx.
 
-## Путь данных и узкое место (важно для Фазы 4)
-Кадр сейчас: **GPU (DXGI-захват) → CPU (staging-копия + наложение курсора + `BgraToNv12`, ~25мс на
-8 МП) → GPU (QuickSync-энкодер)**. Этот крюк через CPU — потолок fps (~50 на 4К) и кусок задержки
-(две пересылки GPU↔CPU). Цель Фазы 4 — убрать CPU из тракта (VideoProcessor + D3D11-вход энкодера,
-zero-copy). См. `docs/ROADMAP.md`.
+## Путь данных (Фаза 4 — GPU zero-copy, режим по умолчанию)
+Кадр: **GPU (DXGI-захват) → GPU VPP (BGRA→NV12, курсор как substream) → NV12-текстура напрямую в
+QuickSync MFT (zero-copy)** — без пересылок GPU↔CPU. Проверено изолированно (`--selftest-gpu`) на
+обновлённом Intel-драйвере: 110/110 кадров, «GPU pipeline OK». Боевой режим — 30 fps @ 1920×1280,
+~1.4–1.5 МБ/с, enc-lat ~20–30 мс, 0 discard.
+
+Запасной путь — CPU (`--cpu`): DXGI-захват → staging-копия → `BgraToNv12` → memory-input энкодера
+(без VPP и без D3D11-входа). Включать, если GPU-тракт недоступен/нестабилен. См. `docs/ROADMAP.md`.
 
 ## Живучесть тракта (HevcEncoder/Program)
 - **Пул NV12-буферов** вместо `Clone()` каждый кадр — иначе ~600 МБ/с GC-мусора → паузы → async-MFT
@@ -85,7 +88,15 @@ zero-copy). См. `docs/ROADMAP.md`.
   игнорировался — MFT не повторяет `NeedInput`, пайплайн намертво зависал каждые ~25с, watchdog
   убивал энкодер, на клиенте — фриз+перезагрузка потока.
 - **Watchdog:** энкодер помечается `Faulted` при сбое потока событий; главный цикл пересоздаёт его
-  при сбое или простое вывода >5с. Глобальный логгер `UnhandledException`.
+  при сбое или простое вывода **>6 с**. Глобальный логгер `UnhandledException`. Фолт event loop
+  логируется с полным стектрейсом; null-event / sample без буфера взяты под защиту (иначе NRE →
+  лишнее пересоздание).
+- **High priority процесса** (`Program.cs`): MFT и цикл захвата не голодают, когда система нагружена
+  (наблюдалось: параллельная сборка на 100% CPU → `ProcessOutput` ~1.7 с → фриз).
+- **Heartbeat `PING`** клиенту каждые 2 с, пока нет видео (`Server.cs` SendLoop) — клиент не уходит
+  в реконнект во время столла/пересоздания энкодера.
+- **Рестарт adb-сервера запрещён во время стрима** (`AdbController.AutoRestartEnabled`): `kill-server`
+  рвёт туннель `adb reverse` и убивает клиента.
 - **DXGI access lost** (`0x887A0026/0022`, смена режима/UAC/fullscreen) → `_dup` обнуляется,
   переинициализация с **2с backoff** (раньше спамил NRE ~30 раз/с при затяжной потере). Пока
   duplication не восстановлен, энкодер получает последний захваченный кадр (экран замирает, но

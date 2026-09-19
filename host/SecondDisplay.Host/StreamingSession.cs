@@ -188,15 +188,14 @@ public sealed class StreamingSession : IDisposable
                     }
                 }
 
-                // Watchdog: recreate the encoder only if its async MFT faulted, or if it stopped
-                // emitting output for a long time while we keep feeding it. The threshold is very
-                // generous (12s) on purpose: recreating the encoder costs ~5-12s of total blackout,
-                // and the old Intel iGPU driver routinely stalls for several seconds under load
-                // (a window drag spiked it to 4.6-7.8s in the host log) and then recovers on its own.
-                // Killing it during such a hiccup was self-inflicting the black frame the user saw.
-                // The client now receives heartbeats while no video flows, so a long silent stretch
-                // no longer triggers a client reconnect either. Only a truly wedged encoder is recreated.
-                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 12000)))
+                // Watchdog: recreate the encoder if its async MFT faulted, or if it stopped emitting
+                // output for a long time while we keep feeding it. The threshold is 6s: the observed
+                // stalls on this Intel iGPU are *hard* (zero output for 13-14s, never self-recover),
+                // while a merely slow encoder still emits every ~3.5s so its idle stays well under 6s.
+                // Recreating costs ~5s of black, so recovering sooner shortens the freeze. The client
+                // now receives heartbeats while no video flows, so this recreate no longer triggers a
+                // client reconnect either.
+                if (encoder != null && (encoder.Faulted || (lastOutputMs > 0 && frameStart - lastOutputMs > 6000)))
                 {
                     Console.WriteLine($"Encoder unhealthy (faulted={encoder.Faulted}, idle={frameStart - lastOutputMs}ms) — recreating");
                     encoder.Dispose(); encoder = null;
@@ -279,7 +278,14 @@ public sealed class StreamingSession : IDisposable
                                 int outCursorY = ScaleCoord(dxgi.CurY, encH, capHeight);
                                 int outCursorW = Math.Max(1, ScaleCoord(dxgi.CursorW, encW, capWidth));
                                 int outCursorH = Math.Max(1, ScaleCoord(dxgi.CursorH, encH, capHeight));
-                                server.BroadcastCursor(dxgi.CurVisible, outCursorX, outCursorY, outCursorW, outCursorH, dxgi.CurVisible ? cursorShape : null);
+                                // The cursor coords/size are expressed in *encode* resolution, so the
+                                // pixel data must be rescaled to match. Sending the native-size bitmap
+                                // under scaled dimensions made the client build a bitmap from
+                                // mismatched data (torn / doubled cursor) whenever encode < capture.
+                                byte[]? shapeToSend = cursorShape;
+                                if (shapeToSend != null)
+                                    shapeToSend = ScaleBgra(shapeToSend, dxgi.CursorW, dxgi.CursorH, outCursorW, outCursorH);
+                                server.BroadcastCursor(dxgi.CurVisible, outCursorX, outCursorY, outCursorW, outCursorH, dxgi.CurVisible ? shapeToSend : null);
                                 lastCursorVisible = dxgi.CurVisible;
                                 lastCursorX = dxgi.CurX;
                                 lastCursorY = dxgi.CurY;
@@ -384,6 +390,34 @@ public sealed class StreamingSession : IDisposable
     {
         if (input <= 0) return value;
         return (int)Math.Round(value * (double)output / input);
+    }
+
+    /// <summary>
+    /// Nearest-neighbour rescale of a straight-BGRA cursor bitmap so its size matches the
+    /// (encode-resolution) dimensions the client is told. Cursor shapes are tiny and change rarely,
+    /// so this cost is negligible.
+    /// </summary>
+    private static byte[] ScaleBgra(byte[] src, int sw, int sh, int dw, int dh)
+    {
+        if (sw == dw && sh == dh) return src;
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return src;
+        var dst = new byte[dw * dh * 4];
+        for (int y = 0; y < dh; y++)
+        {
+            int sy = (int)((long)y * sh / dh);
+            int srcRow = sy * sw;
+            int dstRow = y * dw;
+            for (int x = 0; x < dw; x++)
+            {
+                int si = (srcRow + (int)((long)x * sw / dw)) * 4;
+                int di = (dstRow + x) * 4;
+                dst[di] = src[si];
+                dst[di + 1] = src[si + 1];
+                dst[di + 2] = src[si + 2];
+                dst[di + 3] = src[si + 3];
+            }
+        }
+        return dst;
     }
 
     /// <summary>Disposes encoder/converter/dxgi/gdi/server if Run didn't already (idempotent).</summary>

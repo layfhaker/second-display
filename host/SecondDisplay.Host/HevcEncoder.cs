@@ -208,7 +208,14 @@ public sealed class HevcEncoder : IDisposable
         {
             try
             {
-                IMFMediaEvent ev = _eventGen.GetEvent(0);
+                IMFMediaEvent? ev = _eventGen.GetEvent(0);
+                if (ev == null)
+                {
+                    // A misbehaving MFT can return S_OK with a null event; guard so we don't
+                    // NullReference the event loop (which would force an encoder recreate).
+                    Thread.Sleep(1);
+                    continue;
+                }
                 var type = ev.Type;
                 ev.Dispose();
 
@@ -242,9 +249,10 @@ public sealed class HevcEncoder : IDisposable
             }
             catch (Exception ex)
             {
-                // Hardware MFT can fault (mode change, GPU TDR, etc.). Don't die silently —
-                // flag it so the main loop recreates the encoder, then exit this thread.
-                Console.WriteLine($"Encoder event loop fault: {ex.Message} (0x{ex.HResult:X8}) — flagging for restart");
+                // Hardware MFT can fault (mode change, GPU TDR, driver bug). Log the full detail
+                // (type + HRESULT + stack) so a fault can be diagnosed, flag for restart, exit.
+                Console.WriteLine($"Encoder event loop fault: {ex.GetType().Name}: {ex.Message} (0x{ex.HResult:X8}) — flagging for restart");
+                Console.WriteLine(ex.StackTrace);
                 Faulted = true;
                 return;
             }
@@ -317,6 +325,13 @@ public sealed class HevcEncoder : IDisposable
 
         long ptsMicros = sample.SampleTime / 10;
         using var contiguous = sample.ConvertToContiguousBuffer();
+        if (contiguous == null)
+        {
+            // Sample with no buffer (some MFT/driver combinations return one). Without this guard
+            // the following Lock() NullReferences the event loop → encoder recreate.
+            sample.Dispose();
+            return;
+        }
         contiguous.Lock(out IntPtr p, out _, out int len);
         var data = new byte[len];
         Marshal.Copy(p, data, 0, len);
