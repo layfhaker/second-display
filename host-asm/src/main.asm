@@ -6,8 +6,10 @@
 ;     (CreatePipe / SetHandleInformation / ReadFile), and log it.
 ; M4: TCP listener on ws2_32 — WSAStartup / socket / SO_REUSEADDR / bind / listen / select /
 ;     accept / recv / send — decoding a real HELLO packet and answering with READY.
+; M5: COM from scratch — CoInitializeEx, CreateDXGIFactory1, then hand-rolled vtable calls
+;     (EnumAdapters1 / GetDesc / EnumOutputs / GetDesc / Release) to enumerate adapters/outputs.
 ;
-; Next: DXGI capture / D3D11 VPP / Media Foundation HEVC (COM), then the orchestrator.
+; Next: D3D11 device + DXGI Desktop Duplication; then D3D11 VideoProcessor and Media Foundation HEVC.
 
 option casemap:none
 
@@ -69,6 +71,11 @@ EXTERN recv:PROC
 EXTERN send:PROC
 EXTERN closesocket:PROC
 
+; ---- COM imports (ole32 / dxgi) ----
+EXTERN CoInitializeEx:PROC
+EXTERN CoUninitialize:PROC
+EXTERN CreateDXGIFactory1:PROC
+
 .data
 szLocal   db "LOCALAPPDATA", 0
 szSub     db "\SecondDisplay", 0
@@ -105,6 +112,19 @@ szAccept  db "accept() failed wsa=", 0
 
 oneInt    dd 1
 
+; IID_IDXGIFactory1 {770AAE78-F26F-4DBA-A829-253C83D1B387}, stored the way COM wants it
+iidFactory1 db 78h,0AEh,0Ah,77h,6Fh,0F2h,0BAh,4Dh,0A8h,29h,25h,3Ch,83h,0D1h,0B3h,87h
+
+szCoFail   db "CoInitializeEx failed hr=", 0
+szDxgiFail db "CreateDXGIFactory1 failed hr=", 0
+szAdapter  db "adapter: ", 0
+szVendor   db "  vendor=", 0
+szDevice   db "  device=", 0
+szOutName  db "  output: ", 0
+szRectX    db "    x=", 0
+szRectY    db "    y=", 0
+szDxgiDone db "DXGI probe done", 13, 10, 0
+
 ; SECURITY_ATTRIBUTES { nLength=24, lpSecurityDescriptor=NULL, bInheritHandle=TRUE }
 saBuf     dd 24
           dd 0                    ; padding
@@ -139,6 +159,13 @@ sockListen dd ?
 sockClient dd ?
 pktLen    dd ?
 
+pFactory  dq ?                 ; IDXGIFactory1*
+pAdapter  dq ?                 ; IDXGIAdapter1*
+pOutput   dq ?                 ; IDXGIOutput*
+adapterDesc db 320 dup(?)      ; DXGI_ADAPTER_DESC
+outDesc   db 128 dup(?)        ; DXGI_OUTPUT_DESC
+ansiBuf   db 320 dup(?)        ; wide -> ansi scratch
+
 .code
 
 ; Copy a NUL-terminated string: rcx = dest, rdx = src. Returns rax = dest end (at the NUL).
@@ -155,6 +182,26 @@ copy_loop:
 copy_done:
     ret
 copy_z endp
+
+; Wide (UTF-16) -> ANSI: rcx = dest, rdx = src. Non-ASCII becomes '?'. Returns rax = dest end.
+wc2a proc
+    mov     rax, rcx
+wc_loop:
+    movzx   r8d, word ptr [rdx]
+    test    r8d, r8d
+    jz      wc_done
+    cmp     r8d, 7Fh
+    jbe     wc_store
+    mov     r8d, '?'
+wc_store:
+    mov     byte ptr [rax], r8b
+    inc     rax
+    add     rdx, 2
+    jmp     wc_loop
+wc_done:
+    mov     byte ptr [rax], 0
+    ret
+wc2a endp
 
 ; Write two decimal digits: rcx = dest, edx = value (0..99). Returns rax = dest + 2.
 u2 proc
@@ -571,6 +618,134 @@ tcp_done:
     ret
 run_tcp_selftest endp
 
+; DXGI probe: initialise COM, create a DXGI factory, walk every adapter and its outputs,
+; logging what the desktop actually exposes. Proves hand-written vtable dispatch works.
+;
+; vtable slots used (see the DXGI headers):
+;   IDXGIObject/IDXGIFactory:  56 = EnumAdapters,  96 = EnumAdapters1
+;   IDXGIAdapter:              56 = EnumOutputs,   64 = GetDesc
+;   IDXGIOutput:               56 = GetDesc
+;   IUnknown:                  16 = Release
+run_dxgi_probe proc
+    push    r12
+    push    r13
+    sub     rsp, 68h
+
+    ; ---- CoInitializeEx(NULL, COINIT_MULTITHREADED) ----
+    xor     ecx, ecx
+    xor     edx, edx
+    call    CoInitializeEx
+    test    eax, eax
+    jz      co_ok
+    cmp     eax, 1                 ; S_FALSE = already initialised, still fine
+    je      co_ok
+    mov     edx, eax
+    lea     rcx, szCoFail
+    call    emit_num
+    jmp     probe_done
+
+co_ok:
+    ; ---- CreateDXGIFactory1(&IID_IDXGIFactory1, &pFactory) ----
+    lea     rcx, iidFactory1
+    lea     rdx, pFactory
+    call    CreateDXGIFactory1
+    test    eax, eax
+    jz      factory_ok
+    mov     edx, eax
+    lea     rcx, szDxgiFail
+    call    emit_num
+    jmp     probe_uninit
+
+factory_ok:
+    xor     r12d, r12d             ; adapter index
+
+adapt_loop:
+    mov     rcx, pFactory
+    mov     rax, [rcx]             ; vtable
+    mov     edx, r12d
+    lea     r8, pAdapter
+    call    qword ptr [rax+96]     ; EnumAdapters1
+    test    eax, eax
+    jnz     adapt_done
+
+    mov     rcx, pAdapter
+    mov     rax, [rcx]
+    lea     rdx, adapterDesc
+    call    qword ptr [rax+64]     ; IDXGIAdapter::GetDesc
+
+    lea     rcx, szAdapter
+    call    emit_z
+    lea     rcx, ansiBuf
+    lea     rdx, adapterDesc       ; WCHAR Description[128]
+    call    wc2a
+    lea     rcx, ansiBuf
+    call    emit_z
+    lea     rcx, szVendor
+    mov     edx, dword ptr [adapterDesc+256]
+    call    emit_num
+    lea     rcx, szDevice
+    mov     edx, dword ptr [adapterDesc+260]
+    call    emit_num
+
+    xor     r13d, r13d             ; output index
+out_loop:
+    mov     rcx, pAdapter
+    mov     rax, [rcx]
+    mov     edx, r13d
+    lea     r8, pOutput
+    call    qword ptr [rax+56]     ; IDXGIAdapter::EnumOutputs
+    test    eax, eax
+    jnz     out_done
+
+    mov     rcx, pOutput
+    mov     rax, [rcx]
+    lea     rdx, outDesc
+    call    qword ptr [rax+56]     ; IDXGIOutput::GetDesc
+
+    lea     rcx, szOutName
+    call    emit_z
+    lea     rcx, ansiBuf
+    lea     rdx, outDesc           ; WCHAR DeviceName[32]
+    call    wc2a
+    lea     rcx, ansiBuf
+    call    emit_z
+    lea     rcx, szRectX
+    mov     edx, dword ptr [outDesc+64]   ; DesktopCoordinates.left
+    call    emit_num
+    lea     rcx, szRectY
+    mov     edx, dword ptr [outDesc+68]   ; DesktopCoordinates.top
+    call    emit_num
+
+    mov     rcx, pOutput
+    mov     rax, [rcx]
+    call    qword ptr [rax+16]     ; Release
+    inc     r13d
+    jmp     out_loop
+
+out_done:
+    mov     rcx, pAdapter
+    mov     rax, [rcx]
+    call    qword ptr [rax+16]     ; Release
+    inc     r12d
+    jmp     adapt_loop
+
+adapt_done:
+    lea     rcx, szDxgiDone
+    call    emit_z
+    mov     rcx, pFactory
+    mov     rax, [rcx]
+    call    qword ptr [rax+16]     ; Release
+
+probe_uninit:
+    call    CoUninitialize
+
+probe_done:
+    add     rsp, 68h
+    pop     r13
+    pop     r12
+    ret
+run_dxgi_probe endp
+
 ; int mainCRTStartup(void)
 mainCRTStartup proc
     sub     rsp, 38h
@@ -647,6 +822,9 @@ mainCRTStartup proc
 
     ; ---- TCP handshake self-test ----
     call    run_tcp_selftest
+
+    ; ---- DXGI adapter/output probe ----
+    call    run_dxgi_probe
 
     mov     rcx, logHandle
     call    CloseHandle
