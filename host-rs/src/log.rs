@@ -24,10 +24,20 @@ pub fn default_log_path() -> PathBuf {
     base.join("SecondDisplay").join("host.log")
 }
 
-/// Start the background logger. Truncates the file, like the C# host does on start.
+/// Start the background logger. The previous run's file is kept as `<name>.prev` so a crash can
+/// still be diagnosed after the host restarts (truncating it destroyed the evidence every time).
 pub fn init(path: &PathBuf) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    if path.exists() {
+        let mut prev = path.clone();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "host.log".into());
+        prev.set_file_name(format!("{name}.prev"));
+        let _ = std::fs::rename(path, &prev);
     }
     let file: File = OpenOptions::new()
         .create(true)

@@ -8,12 +8,14 @@ use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
-use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D::{
+    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
@@ -93,12 +95,16 @@ impl DxgiCapture {
 
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
-            let levels = [D3D_FEATURE_LEVEL_11_0];
+            // Same flags and feature levels as the C# host: the Media Foundation encoder shares this
+            // device (zero-copy path), which needs VIDEO_SUPPORT, and the immediate context is used
+            // from both the capture and the encoder thread, so it must be multithread protected.
+            let levels =
+                [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1];
             D3D11CreateDevice(
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN,
                 Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 Some(&levels),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
@@ -108,6 +114,10 @@ impl DxgiCapture {
             .map_err(|e| e.to_string())?;
             let device = device.ok_or("D3D11 device creation returned null")?;
             let context = context.ok_or("D3D11 context creation returned null")?;
+
+            if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+                let _ = mt.SetMultithreadProtected(true);
+            }
 
             let dup = output1.DuplicateOutput(&device).map_err(|e| e.to_string())?;
 
