@@ -84,6 +84,28 @@
 Ещё не сделано: force keyframe вместо пересоздания энкодера при подключении клиента; убрать мёртвый
 UDP/RNDIS-код из `Server.cs`.
 
+## Rust-переписка хоста (`host-rs/`) — 2026-09-19
+
+Параллельно с C#-хостом (`host/`) начата переписка на Rust; **обе версии сосуществуют**, C#
+остаётся боевой/референсной. Отдельный крейт `host-rs/` (бин `seconddisplay-host`), биндинги —
+`windows` crate (windows-rs) вместо Vortice.
+
+Портировано и проверено на этой машине (`cargo build --release` + self-тесты):
+opencards/логирование, протокол, single-instance, adb-контроллер (с теми же фиксами живучести),
+readiness, VDD-контроль, enum мониторов + детект VDD, input (SendInput), TCP-сервер с сессиями и
+heartbeat, **DXGI Desktop Duplication**, CPU-конверт BGRA→NV12 и **Media Foundation HEVC (QuickSync)**.
+
+Проверки:
+- `--selftest-hevc` → 117 кадров, ~4.35 МБ, «HEVC encoder OK».
+- `--selftest-gpu -1 --selftest-seconds 5` (GPU zero-copy) → captured 131 / encoded 131 @ 1920×1080, «pipeline OK»; на `--cpu` — 117/117.
+- `--probe` → 3 монитора (вкл. VDD) + планшет в `adb devices`.
+
+**GPU zero-copy портирован**: DXGI-текстура → D3D11 VideoProcessor (BGRA→NV12) → NV12-текстура
+напрямую в MFT (IMFDXGIDeviceManager) — режим по умолчанию; `--cpu` — запасной путь.
+Ещё не портировано: GDI-захват (fallback), мёртвый UDP/RNDIS-транспорт, force-keyframe вместо
+пересоздания энкодера. Подробности и грабли MF (601/602, `MF_E_NO_EVENTS_AVAILABLE`,
+`MF_EVENT_FLAG_NO_WAIT`) — в `host-rs/README.md`.
+
 ## История: своя реализация драйвера (тупик, для справки)
 Полностью в **`docs/DRIVER_JOURNEY.md`**. Кратко: свой IddCx-драйвер собирается и грузится, но
 крашится `ReportDdiFunctionCountMismatch` — EWDK 28000 даёт несовместимую с IddCx 1.2 этой ОС

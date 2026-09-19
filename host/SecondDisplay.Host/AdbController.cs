@@ -44,6 +44,12 @@ public sealed class AdbController
         if (!string.IsNullOrEmpty(adbPathOverride) && File.Exists(adbPathOverride))
             return adbPathOverride;
 
+        // Prefer the adb we ship next to the host (installer layout: <app>\platform-tools\adb.exe),
+        // so an installed host does not depend on adb being on the user's PATH.
+        string bundled = Path.Combine(AppContext.BaseDirectory, "platform-tools", "adb.exe");
+        if (File.Exists(bundled))
+            return bundled;
+
         // Try adb on PATH
         try
         {

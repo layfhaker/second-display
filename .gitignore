@@ -5,6 +5,7 @@
 **/.gradle/
 **/.kotlin/
 **/.idea/
+target/
 .vs/
 *.user
 *.suo

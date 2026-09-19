@@ -23,6 +23,39 @@ gradle -p android\SecondDisplay :app:assembleDebug
 copy android\SecondDisplay\app\build\outputs\apk\debug\app-debug.apk releases\android\
 ```
 
+## Как собрать установщик (Windows)
+
+Одна команда собирает хост, APK, кладёт `adb` и компилирует установщик в `releases/`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Version 1.0.0
+# -> releases\SecondDisplay-Setup-1.0.0.exe       (мультиязычный: ru+en)
+# -> releases\SecondDisplay-Setup-1.0.0-ru.exe     (только русский)
+# -> releases\SecondDisplay-Setup-1.0.0-en.exe     (только английский)
+```
+
+Сборщик компилирует **по установщику на каждый язык** (Inno подстановки `/DLangRu` / `/DLangEn`;
+без них — один мультиязычный), все кладутся в `releases/`.
+
+Что делает `scripts\build-release.ps1`:
+1. `dotnet publish` хоста (self-contained win-x64 по умолчанию) → `build\staging\host`;
+2. собирает Android-клиент (Gradle `:app:assembleDebug`) → `build\staging\android\app-debug.apk`;
+3. кладёт `adb.exe` + 2 DLL в `build\staging\platform-tools`;
+4. компилирует Inno Setup-скрипт `installer\SecondDisplay.iss` → `releases\SecondDisplay-Setup-<ver>.exe`.
+
+Требования: .NET SDK, JDK 17 + Android SDK + Gradle, Inno Setup 6
+(`winget install JRSoftware.InnoSetup`). Пути ищутся автоматически; можно задать
+`-SdkDir`, `-JavaHome`, `-GradleExe`, `-Iscc`, `-SelfContained:$false`.
+
+Что делает установщик (`installer\SecondDisplay.iss` + `installer\seconddisplay-setup.ps1`):
+- ставит хост в **`%ProgramFiles%\SecondDisplay`** (x64);
+- кладёт рядом **`platform-tools\adb.exe`** (хост предпочитает его adb из PATH);
+- регистрирует автозапуск — задачу `SecondDisplayHost` (`--auto`, при входе, `Highest`);
+- **обязательно** ставит клиент на подключённый планшет: `adb install -r app-debug.apk`
+  (если планшета нет — установщик предупредит и покажет команду для повторного запуска);
+- хост пишет рантайм-лог в **`%LOCALAPPDATA%\SecondDisplay\host.log`**, установщик — в
+  `%LOCALAPPDATA%\SecondDisplay\install.log`.
+
 ## Как выложить релиз на GitHub
 
 ```powershell
