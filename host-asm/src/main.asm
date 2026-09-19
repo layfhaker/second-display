@@ -4,8 +4,10 @@
 ; M2: runtime logging to %LOCALAPPDATA%\SecondDisplay\host-asm.log with a local timestamp.
 ; M3: spawn adb via CreateProcessA with CREATE_NO_WINDOW, capture its output through a pipe
 ;     (CreatePipe / SetHandleInformation / ReadFile), and log it.
+; M4: TCP listener on ws2_32 — WSAStartup / socket / SO_REUSEADDR / bind / listen / select /
+;     accept / recv / send — decoding a real HELLO packet and answering with READY.
 ;
-; Next: wire protocol + TCP (ws2_32); then DXGI capture / D3D11 VPP / Media Foundation HEVC (COM).
+; Next: DXGI capture / D3D11 VPP / Media Foundation HEVC (COM), then the orchestrator.
 
 option casemap:none
 
@@ -20,6 +22,21 @@ HANDLE_FLAG_INHERIT    equ 1
 STARTF_USESTDHANDLES   equ 100h
 CREATE_NO_WINDOW       equ 08000000h
 INFINITE               equ 0FFFFFFFFh
+
+; ---- winsock constants ----
+AF_INET                equ 2
+SOCK_STREAM            equ 1
+IPPROTO_TCP            equ 6
+SOL_SOCKET             equ 0FFFFh
+SO_REUSEADDR           equ 4
+
+; ---- wire protocol ----
+PKT_HELLO              equ 01h
+PKT_READY              equ 02h
+CODEC_H265             equ 2
+
+PORT                   equ 27315   ; the shipped host listens here
+SELFTEST_PORT          equ 27316   ; this milestone self-tests alongside a running host
 
 ; ---- Win32 imports (kernel32) ----
 EXTERN GetStdHandle:PROC
@@ -38,6 +55,20 @@ EXTERN WaitForSingleObject:PROC
 EXTERN GetExitCodeProcess:PROC
 EXTERN GetLastError:PROC
 
+; ---- winsock imports (ws2_32) ----
+EXTERN WSAStartup:PROC
+EXTERN WSACleanup:PROC
+EXTERN WSAGetLastError:PROC
+EXTERN socket:PROC
+EXTERN setsockopt:PROC
+EXTERN bind:PROC
+EXTERN listen:PROC
+EXTERN select:PROC
+EXTERN accept:PROC
+EXTERN recv:PROC
+EXTERN send:PROC
+EXTERN closesocket:PROC
+
 .data
 szLocal   db "LOCALAPPDATA", 0
 szSub     db "\SecondDisplay", 0
@@ -55,6 +86,24 @@ szBr      db "bytes=", 0
 szReadErr db "ReadFile err=", 0
 szHOut    db "hOut=", 0
 szHWrite  db "writeH=", 0
+
+szWsaFail db "WSAStartup failed", 13, 10, 0
+szSockFail db "socket() failed", 13, 10, 0
+szBindFail db "bind() failed wsa=", 0
+szListenOk db "TCP listening on 0.0.0.0:27316", 13, 10, 0
+szNoClient db "no client within 15s", 13, 10, 0
+szClient  db "TCP client connected", 13, 10, 0
+szPktType db "packet type=", 0
+szPktLen  db "packet len=", 0
+szHelloW  db "hello width=", 0
+szHelloH  db "hello height=", 0
+szHelloD  db "hello density=", 0
+szHelloR  db "hello refresh=", 0
+szReady   db "READY sent (1920x1280 refresh=60 codec=2)", 13, 10, 0
+szRecvFail db "recv failed wsa=", 0
+szAccept  db "accept() failed wsa=", 0
+
+oneInt    dd 1
 
 ; SECURITY_ATTRIBUTES { nLength=24, lpSecurityDescriptor=NULL, bInheritHandle=TRUE }
 saBuf     dd 24
@@ -78,6 +127,17 @@ outBuf    db 8192 dup(?)
 br        dd ?
 ec        dd ?
 numBuf    db 16 dup(?)
+
+wsaData   db 512 dup(?)        ; WSADATA
+sa2       db 16 dup(?)         ; sockaddr_in
+fdset     db 24 dup(?)         ; fd_set { u_int count; SOCKET fd_array[] }
+tv        db 8 dup(?)          ; timeval { long sec; long usec }
+recvHdr   db 8 dup(?)          ; 5-byte packet header
+recvPay   db 64 dup(?)
+readyBuf  db 32 dup(?)
+sockListen dd ?
+sockClient dd ?
+pktLen    dd ?
 
 .code
 
@@ -326,6 +386,191 @@ adb_done:
     ret
 run_adb_devices endp
 
+; TCP self-test: listen on 0.0.0.0:27315, accept one client within 15s, decode its packet,
+; answer a HELLO with READY. Mirrors the real handshake in host-rs/src/protocol.rs.
+run_tcp_selftest proc
+    sub     rsp, 48h
+
+    ; ---- WSAStartup(MAKEWORD(2,2), &wsaData) ----
+    mov     ecx, 202h
+    lea     rdx, wsaData
+    call    WSAStartup
+    test    eax, eax
+    jz      ws_ok
+    lea     rcx, szWsaFail
+    call    emit_z
+    jmp     tcp_done
+
+ws_ok:
+    ; ---- socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) ----
+    mov     ecx, AF_INET
+    mov     edx, SOCK_STREAM
+    mov     r8d, IPPROTO_TCP
+    call    socket
+    cmp     eax, -1
+    jne     sock_ok
+    lea     rcx, szSockFail
+    call    emit_z
+    jmp     ws_cleanup
+
+sock_ok:
+    mov     sockListen, eax
+
+    ; ---- setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, 4) — never refuse a rebind ----
+    mov     ecx, sockListen
+    mov     edx, SOL_SOCKET
+    mov     r8d, SO_REUSEADDR
+    lea     r9, oneInt
+    mov     dword ptr [rsp+20h], 4
+    call    setsockopt
+
+    ; ---- bind(s, &sockaddr_in{AF_INET, htons(27315), INADDR_ANY}, 16) ----
+    mov     word ptr [sa2], AF_INET
+    mov     eax, SELFTEST_PORT
+    xchg    al, ah                 ; htons
+    mov     word ptr [sa2+2], ax
+    mov     dword ptr [sa2+4], 0   ; INADDR_ANY
+    mov     qword ptr [sa2+8], 0
+
+    mov     ecx, sockListen
+    lea     rdx, sa2
+    mov     r8d, 16
+    call    bind
+    test    eax, eax
+    jz      bind_ok
+    call    WSAGetLastError
+    mov     edx, eax
+    lea     rcx, szBindFail
+    call    emit_num
+    jmp     close_listen
+
+bind_ok:
+    mov     ecx, sockListen
+    mov     edx, 5
+    call    listen
+    lea     rcx, szListenOk
+    call    emit_z
+
+    ; ---- select(0, &fdset{sockListen}, NULL, NULL, &timeval{15s}) ----
+    mov     dword ptr [fdset], 1
+    mov     eax, sockListen
+    mov     qword ptr [fdset+8], rax
+    mov     dword ptr [tv], 15
+    mov     dword ptr [tv+4], 0
+    xor     ecx, ecx
+    lea     rdx, fdset
+    xor     r8d, r8d
+    xor     r9d, r9d
+    lea     rax, tv
+    mov     qword ptr [rsp+20h], rax
+    call    select
+    test    eax, eax
+    jg      have_client
+    lea     rcx, szNoClient
+    call    emit_z
+    jmp     close_listen
+
+have_client:
+    mov     ecx, sockListen
+    xor     edx, edx
+    xor     r8d, r8d
+    call    accept
+    cmp     eax, -1
+    jne     accepted
+    call    WSAGetLastError
+    mov     edx, eax
+    lea     rcx, szAccept
+    call    emit_num
+    jmp     close_listen
+accepted:
+    mov     sockClient, eax
+    lea     rcx, szClient
+    call    emit_z
+
+    ; ---- recv the 5-byte header: [type][u32 LE length] ----
+    mov     ecx, sockClient
+    lea     rdx, recvHdr
+    mov     r8d, 5
+    xor     r9d, r9d
+    call    recv
+    cmp     eax, 5
+    je      hdr_ok
+    call    WSAGetLastError
+    mov     edx, eax
+    lea     rcx, szRecvFail
+    call    emit_num
+    jmp     close_client
+
+hdr_ok:
+    lea     rcx, szPktType
+    movzx   edx, byte ptr [recvHdr]
+    call    emit_num
+    mov     eax, dword ptr [recvHdr+1]   ; payload length, little-endian
+    mov     pktLen, eax
+    lea     rcx, szPktLen
+    mov     edx, eax
+    call    emit_num
+
+    ; ---- recv the payload ----
+    mov     eax, pktLen
+    test    eax, eax
+    jz      send_ready
+    mov     ecx, sockClient
+    lea     rdx, recvPay
+    mov     r8d, eax
+    xor     r9d, r9d
+    call    recv
+
+    ; ---- HELLO = 4 little-endian u32: width, height, density, refresh ----
+    cmp     byte ptr [recvHdr], PKT_HELLO
+    jne     send_ready
+    cmp     pktLen, 16
+    jb      send_ready
+    lea     rcx, szHelloW
+    mov     edx, dword ptr [recvPay]
+    call    emit_num
+    lea     rcx, szHelloH
+    mov     edx, dword ptr [recvPay+4]
+    call    emit_num
+    lea     rcx, szHelloD
+    mov     edx, dword ptr [recvPay+8]
+    call    emit_num
+    lea     rcx, szHelloR
+    mov     edx, dword ptr [recvPay+12]
+    call    emit_num
+
+send_ready:
+    ; ---- READY: header [0x02][13] + width, height, refresh, codec ----
+    mov     byte ptr [readyBuf], PKT_READY
+    mov     dword ptr [readyBuf+1], 13
+    mov     dword ptr [readyBuf+5], 1920
+    mov     dword ptr [readyBuf+9], 1280
+    mov     dword ptr [readyBuf+13], 60
+    mov     byte ptr [readyBuf+17], CODEC_H265
+    mov     ecx, sockClient
+    lea     rdx, readyBuf
+    mov     r8d, 18
+    xor     r9d, r9d
+    call    send
+    lea     rcx, szReady
+    call    emit_z
+
+close_client:
+    mov     ecx, sockClient
+    call    closesocket
+
+close_listen:
+    mov     ecx, sockListen
+    call    closesocket
+
+ws_cleanup:
+    call    WSACleanup
+
+tcp_done:
+    add     rsp, 48h
+    ret
+run_tcp_selftest endp
+
 ; int mainCRTStartup(void)
 mainCRTStartup proc
     sub     rsp, 38h
@@ -399,6 +644,9 @@ mainCRTStartup proc
     mov     edx, szAdbTail_len
     call    emit
     call    run_adb_devices
+
+    ; ---- TCP handshake self-test ----
+    call    run_tcp_selftest
 
     mov     rcx, logHandle
     call    CloseHandle
