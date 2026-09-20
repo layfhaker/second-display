@@ -1965,11 +1965,12 @@ cap_frame_live:
     cmp     eax, liveFrames
     jae     cap_frame_done
 
-    ; The MFT emits its keyframe on the first frame it is fed, and the first frame of a session can be
-    ; empty because the desktop is not composited yet. Feeding that one gives the client a black
-    ; keyframe and every later frame is a P-frame against it, so the tablet stays black. Drop it.
-    cmp     dword ptr [liveCount], 1
-    jne     cap_live_feed
+    ; The MFT emits its keyframe on the first frame it is fed, and the first frames of a session can be
+    ; empty because the desktop is not composited yet. Feeding one of those gives the client a black
+    ; keyframe and every later frame is a P-frame against it, so the tablet stays black. Drop a few, so
+    ; the keyframe carries a real desktop.
+    cmp     dword ptr [liveCount], 5
+    ja      cap_live_feed
     call    cap_release_frame
     jmp     cap_frame_begin
 cap_live_feed:
