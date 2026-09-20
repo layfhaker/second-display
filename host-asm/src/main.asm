@@ -91,7 +91,9 @@ EXTERN MFTEnumEx:PROC
 EXTERN MFCreateMediaType:PROC
 EXTERN MFCreateSample:PROC
 EXTERN MFCreateMemoryBuffer:PROC
-EXTERN MFCreateDXGIDeviceManager:PROC
+EXTERN GetCursorPos:PROC
+EXTERN SendInput:PROC
+EXTERN ioctlsocket:PROC
 EXTERN MFCreateDXGISurfaceBuffer:PROC
 EXTERN CoTaskMemFree:PROC
 
@@ -341,6 +343,24 @@ pActivate dq ?                 ; IMFActivate*
 pTransform dq ?                ; IMFTransform*
 pDevManager dq ?               ; IMFDXGIDeviceManager* handed to the encoder
 mfDevToken dd ?                ; its reset token
+curPt     db 8 dup(?)          ; POINT: where the mouse is, in desktop coordinates
+; 16 rows of 16 bytes: 1 marks a pointer pixel. Drawn opaque so it stays visible on any wallpaper.
+curShape  db 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+          db 1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+          db 1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
+          db 1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0
+          db 1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
+          db 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0
+          db 1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0
+          db 1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0
+          db 1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0
+          db 1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0
+          db 1,1,1,1,1,0,0,1,1,1,1,0,0,0,0,0
+          db 1,1,1,0,1,1,0,0,1,1,1,1,0,0,0,0
+          db 1,1,0,0,0,1,1,0,0,1,1,1,1,0,0,0
+          db 1,0,0,0,0,0,1,1,0,0,1,1,1,1,0,0
+          db 0,0,0,0,0,0,0,1,1,0,0,1,1,1,1,0
+          db 0,0,0,0,0,0,0,0,1,1,0,1,1,1,1,1
 pEventGen dq ?                 ; IMFMediaEventGenerator* (QI of the transform)
 pAttrs    dq ?                 ; IMFAttributes* of the transform
 pOutType  dq ?                 ; IMFMediaType* (HEVC)
@@ -953,8 +973,71 @@ svf_done:
     ret
 send_video_frame endp
 
-; ---------------------------------------------------------------------------
-; payload_is_keyframe — 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
+draw_cursor proc
+    ; Paint a pointer into the mapped BGRA frame. The client's own cursor packet is not needed for
+    ; this: the pointer lives on the virtual display, so its position is simply GetCursorPos minus the
+    ; display origin, clipped to the frame. r10d = row pitch, r11 = plane base, used by the caller.
+    push    rbx
+    push    r12
+    push    r13
+    sub     rsp, 40h
+    lea     rcx, curPt
+    call    GetCursorPos
+    test    eax, eax
+    jz      dc_done
+    mov     eax, dword ptr [curPt]         ; screen x
+    sub     eax, dword ptr [outDesc+64]    ; minus the display's left edge
+    mov     r12d, eax
+    mov     eax, dword ptr [curPt+4]       ; screen y
+    sub     eax, dword ptr [outDesc+68]
+    mov     r13d, eax
+    test    r12d, r12d
+    js      dc_done
+    test    r13d, r13d
+    js      dc_done
+    cmp     r12d, 1904                     ; 1920 - 16: keep the 16x16 pointer inside the frame
+    jae     dc_done
+    cmp     r13d, 1264
+    jae     dc_done
+    xor     esi, esi                       ; row of the pointer bitmap
+dc_row:
+    cmp     esi, 16
+    jae     dc_done
+    mov     eax, r13d
+    add     eax, esi                       ; frame row
+    imul    eax, r10d                      ; * row pitch
+    lea     rdi, [r11+rax]
+    mov     eax, r12d
+    shl     eax, 2                         ; * 4 bytes per pixel
+    add     rdi, rax
+    xor     edx, edx                       ; column
+dc_col:
+    cmp     edx, 16
+    jae     dc_next_row
+    lea     rax, curShape
+    mov     ecx, esi
+    shl     ecx, 4
+    add     ecx, edx
+    movzx   eax, byte ptr [rax+rcx]
+    test    eax, eax
+    jz      dc_next_col
+    mov     dword ptr [rdi], 0FF000000h    ; opaque black: visible on any desktop
+dc_next_col:
+    add     rdi, 4
+    inc     edx
+    jmp     dc_col
+dc_next_row:
+    inc     esi
+    jmp     dc_row
+dc_done:
+    add     rsp, 40h
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+draw_cursor endp
+
+ — 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
 ; Same rule as the Rust reference: locate 00 00 01 / 00 00 00 01, then read (byte >> 1) & 0x3F and
 ; accept 19/20 (IRAP) or 32/33/34 (VPS/SPS/PPS).
 ; ---------------------------------------------------------------------------
@@ -1528,7 +1611,7 @@ cap_staging_probe:
     mov     dword ptr [r10+24], 0       ; SampleDesc.Quality
     mov     dword ptr [r10+28], 3       ; D3D11_USAGE_STAGING
     mov     dword ptr [r10+32], 0       ; BindFlags
-    mov     dword ptr [r10+36], 20000h  ; D3D11_CPU_ACCESS_READ
+    mov     dword ptr [r10+36], 30000h  ; D3D11_CPU_ACCESS_READ|WRITE - the pointer is drawn in here
     mov     dword ptr [r10+40], 0       ; MiscFlags
 
     mov     rcx, pDevice
@@ -1563,6 +1646,7 @@ cap_staging_probe:
     ; ---- checksum the whole mapped frame: proof that real pixels came back ----
     mov     r11, qword ptr [mapped]        ; pData
     mov     r10d, dword ptr [mapped+8]     ; RowPitch
+    call    draw_cursor                    ; the pointer goes in before the video processor reads this
     mov     rowPitch, r10d
     mov     eax, r10d
     imul    eax, dword ptr [capH]          ; total bytes = RowPitch * Height
@@ -1835,13 +1919,14 @@ cap_stg_created:
     call    mark_start
     mov     rcx, pContext
     mov     rax, [rcx]
-    mov     rdx, pNv12Stg
+    mov     rdx, pStaging
     xor     r8d, r8d
-    mov     r9d, 1
+    mov     r9d, 3                         ; D3D11_MAP_READ_WRITE (the pointer is painted below)
     mov     dword ptr [rsp+20h], 0
     lea     r10, mapped
     mov     qword ptr [rsp+28h], r10
     call    qword ptr [rax+112]            ; Map
+
     test    eax, eax
     jnz     vp_map_fail
 
