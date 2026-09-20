@@ -2150,6 +2150,11 @@ crf_release_all:
     mov     rcx, pVideoDevice
     call    rel_if
     mov     qword ptr [pVideoDevice], 0
+    ; The BGRA texture is 1920x1280x4 = 9.8 MB and is rebuilt every frame, so missing it here leaked
+    ; hundreds of megabytes a second and took the machine to 95% RAM.
+    mov     rcx, pBgraTex
+    call    rel_if
+    mov     qword ptr [pBgraTex], 0
 crf_lease:
     mov     rcx, pDup
     test    rcx, rcx
