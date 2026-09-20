@@ -128,6 +128,7 @@ szStreamKeep db "client kept for streaming", 13, 10, 0
 szSentBytes db "  sent VIDEO payload=", 0
 szSentKey db "  sent keyframe=", 0
 szSendFail db "  send failed wsa=", 0
+szTd       db "teardown step=", 0
 szStreamTot db "STREAM: frames sent=", 0
 szStreamTotB db "STREAM: bytes sent=", 0
 szRecvFail db "recv failed wsa=", 0
@@ -1018,6 +1019,9 @@ payload_is_keyframe endp
 ; megabytes - one step per session - even after the per-frame objects were handled.
 release_previous_capture proc
     sub     rsp, 28h
+    lea     rcx, szTd
+    mov     edx, 2
+    call    emit_num
     mov     rcx, pDup
     call    rel_if
     mov     qword ptr [pDup], 0
@@ -3194,6 +3198,11 @@ mainCRTStartup proc
 
     ; ---- TCP handshake: listen, take one client, answer READY ----
 serve_again:
+    ; Marker: the crash follows a client abort, so the teardown steps are traced. The last one printed
+    ; names the step that dies (the log's next "TCP listening" would mean everything above it survived).
+    lea     rcx, szTd
+    mov     edx, 1
+    call    emit_num
     ; Old capture first, then the new device, then the encoder that is handed it: the encoder probe used
     ; to run before the DXGI probe and so took the previous session's device, which is why releasing the
     ; capture afterwards killed the host and why each session kept a whole device and duplication alive.
