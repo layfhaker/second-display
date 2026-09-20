@@ -91,11 +91,6 @@ EXTERN MFTEnumEx:PROC
 EXTERN MFCreateMediaType:PROC
 EXTERN MFCreateSample:PROC
 EXTERN MFCreateMemoryBuffer:PROC
-EXTERN GetCursorPos:PROC
-EXTERN SendInput:PROC
-EXTERN ioctlsocket:PROC
-EXTERN MFCreateDXGIDeviceManager:PROC
-EXTERN MFCreateDXGISurfaceBuffer:PROC
 EXTERN CoTaskMemFree:PROC
 
 .data
@@ -251,8 +246,6 @@ szMfOutSize  db "MF: output stream cbSize=", 0
 szMfSupplies db "MF: provides_samples=", 0
 szMfMsg      db "MF: ProcessMessage hr=", 0
 szMfReady    db "MF: encoder configured (HEVC <- NV12)", 13, 10, 0
-szMfManager  db "MF: D3D manager setup hr=", 0
-szMfManagerOk db "MF: D3D manager handed to the encoder", 13, 10, 0
 
 szEncQiGen   db "MF: QI(IMFMediaEventGenerator) hr=", 0
 szEncBuf     db "MF: MFCreateMemoryBuffer hr=", 0
@@ -342,26 +335,6 @@ pActivates dq ?                ; IMFActivate** returned by MFTEnumEx
 mftCount  dd ?
 pActivate dq ?                 ; IMFActivate*
 pTransform dq ?                ; IMFTransform*
-pDevManager dq ?               ; IMFDXGIDeviceManager* handed to the encoder
-mfDevToken dd ?                ; its reset token
-curPt     db 8 dup(?)          ; POINT: where the mouse is, in desktop coordinates
-; 16 rows of 16 bytes: 1 marks a pointer pixel. Drawn opaque so it stays visible on any wallpaper.
-curShape  db 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-          db 1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-          db 1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
-          db 1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0
-          db 1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
-          db 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0
-          db 1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0
-          db 1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0
-          db 1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0
-          db 1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0
-          db 1,1,1,1,1,0,0,1,1,1,1,0,0,0,0,0
-          db 1,1,1,0,1,1,0,0,1,1,1,1,0,0,0,0
-          db 1,1,0,0,0,1,1,0,0,1,1,1,1,0,0,0
-          db 1,0,0,0,0,0,1,1,0,0,1,1,1,1,0,0
-          db 0,0,0,0,0,0,0,1,1,0,0,1,1,1,1,0
-          db 0,0,0,0,0,0,0,0,1,1,0,1,1,1,1,1
 pEventGen dq ?                 ; IMFMediaEventGenerator* (QI of the transform)
 pAttrs    dq ?                 ; IMFAttributes* of the transform
 pOutType  dq ?                 ; IMFMediaType* (HEVC)
@@ -974,79 +947,8 @@ svf_done:
     ret
 send_video_frame endp
 
-draw_cursor proc
-    ; Paint a pointer into the mapped BGRA frame. The client's own cursor packet is not needed for
-    ; this: the pointer lives on the virtual display, so its position is simply GetCursorPos minus the
-    ; display origin, clipped to the frame. r10d = row pitch, r11 = plane base, used by the caller.
-    push    rbx
-    push    rsi
-    push    rdi
-    push    r10
-    push    r11
-    push    r12
-    push    r13
-    sub     rsp, 20h
-    lea     rcx, curPt
-    call    GetCursorPos
-    test    eax, eax
-    jz      dc_done
-    mov     eax, dword ptr [curPt]         ; screen x
-    sub     eax, dword ptr [outDesc+64]    ; minus the display's left edge
-    mov     r12d, eax
-    mov     eax, dword ptr [curPt+4]       ; screen y
-    sub     eax, dword ptr [outDesc+68]
-    mov     r13d, eax
-    test    r12d, r12d
-    js      dc_done
-    test    r13d, r13d
-    js      dc_done
-    cmp     r12d, 1904                     ; 1920 - 16: keep the 16x16 pointer inside the frame
-    jae     dc_done
-    cmp     r13d, 1264
-    jae     dc_done
-    xor     esi, esi                       ; row of the pointer bitmap
-dc_row:
-    cmp     esi, 16
-    jae     dc_done
-    mov     eax, r13d
-    add     eax, esi                       ; frame row
-    imul    eax, r10d                      ; * row pitch
-    lea     rdi, [r11+rax]
-    mov     eax, r12d
-    shl     eax, 2                         ; * 4 bytes per pixel
-    add     rdi, rax
-    xor     edx, edx                       ; column
-dc_col:
-    cmp     edx, 16
-    jae     dc_next_row
-    lea     rax, curShape
-    mov     ecx, esi
-    shl     ecx, 4
-    add     ecx, edx
-    movzx   eax, byte ptr [rax+rcx]
-    test    eax, eax
-    jz      dc_next_col
-    mov     dword ptr [rdi], 0FF000000h    ; opaque black: visible on any desktop
-dc_next_col:
-    add     rdi, 4
-    inc     edx
-    jmp     dc_col
-dc_next_row:
-    inc     esi
-    jmp     dc_row
-dc_done:
-    add     rsp, 20h
-    pop     r13
-    pop     r12
-    pop     r11
-    pop     r10
-    pop     rdi
-    pop     rsi
-    pop     rbx
-    ret
-draw_cursor endp
-
-; payload_is_keyframe - 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
+; ---------------------------------------------------------------------------
+; payload_is_keyframe — 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
 ; Same rule as the Rust reference: locate 00 00 01 / 00 00 00 01, then read (byte >> 1) & 0x3F and
 ; accept 19/20 (IRAP) or 32/33/34 (VPS/SPS/PPS).
 ; ---------------------------------------------------------------------------
@@ -1655,9 +1557,6 @@ cap_staging_probe:
     ; ---- checksum the whole mapped frame: proof that real pixels came back ----
     mov     r11, qword ptr [mapped]        ; pData
     mov     r10d, dword ptr [mapped+8]     ; RowPitch
-    ; draw_cursor belongs here, but calling it at this point killed the host before the first frame
-    ; even after the register discipline was fixed, so it stays out until the crash it causes is
-    ; understood - a host that streams beats a host that paints a pointer and dies.
     mov     rowPitch, r10d
     mov     eax, r10d
     imul    eax, dword ptr [capH]          ; total bytes = RowPitch * Height
@@ -1930,14 +1829,13 @@ cap_stg_created:
     call    mark_start
     mov     rcx, pContext
     mov     rax, [rcx]
-    mov     rdx, pStaging
+    mov     rdx, pNv12Stg
     xor     r8d, r8d
-    mov     r9d, 1                         ; D3D11_MAP_READ: READ_WRITE made this map read zeros
+    mov     r9d, 1
     mov     dword ptr [rsp+20h], 0
     lea     r10, mapped
     mov     qword ptr [rsp+28h], r10
     call    qword ptr [rax+112]            ; Map
-
     test    eax, eax
     jnz     vp_map_fail
 
@@ -2486,9 +2384,6 @@ emit_stage_report endp
 ; without ever letting the old one go. Left alone, that is megabytes per frame of growth.
 release_previous_encoder proc
     sub     rsp, 28h
-    mov     rcx, pDevManager
-    call    rel_if
-    mov     qword ptr [pDevManager], 0
     mov     rcx, pInSample
     call    rel_if
     mov     qword ptr [pInSample], 0
@@ -2619,38 +2514,6 @@ mf_got_attrs:
     lea     rdx, mfLowLatency
     mov     r8d, 1
     call    qword ptr [rax+168]            ; MF_LOW_LATENCY
-
-    ; ---- hand our D3D11 device to the encoder: the frame then travels as a texture ----
-    ; This is the path the Rust host uses and the reason its colours are right: no CPU readback, no
-    ; hand-copied planes. It has to happen before the types are set, exactly as in the C# reference.
-    mov     dword ptr [mfDevToken], 0
-    lea     rcx, mfDevToken
-    lea     rdx, pDevManager
-    call    MFCreateDXGIDeviceManager
-    test    eax, eax
-    jnz     mf_manager_fail
-    mov     rcx, pDevManager
-    mov     rax, [rcx]
-    mov     rdx, pDevice
-    mov     r8d, mfDevToken
-    call    qword ptr [rax+24]             ; IMFDXGIDeviceManager::ResetDevice
-    test    eax, eax
-    jnz     mf_manager_fail
-    mov     rcx, pTransform
-    mov     rax, [rcx]
-    mov     edx, 2                          ; MFT_MESSAGE_SET_D3D_MANAGER (mftransform.h line 174)
-    mov     r8, pDevManager
-    call    qword ptr [rax+184]            ; IMFTransform::ProcessMessage
-    test    eax, eax
-    jnz     mf_manager_fail
-    lea     rcx, szMfManagerOk
-    call    emit_z
-    jmp     mf_manager_done
-mf_manager_fail:
-    mov     edx, eax
-    lea     rcx, szMfManager
-    call    emit_num
-mf_manager_done:
 
     ; ---- output type: HEVC 1920x1280 @30, 30 Mbps ----
     lea     rcx, pOutType
