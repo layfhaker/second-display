@@ -3031,7 +3031,8 @@ mainCRTStartup proc
     call    emit
     call    run_adb_devices
 
-    ; ---- TCP handshake self-test ----
+    ; ---- TCP handshake: listen, take one client, answer READY ----
+serve_again:
     call    run_tcp_selftest
 
     ; ---- live loop: one encoder, one long-lived capture, frames handed over as they arrive ----
@@ -3055,6 +3056,10 @@ mainCRTStartup proc
     je      skip_stage_report
     call    emit_stage_report
 skip_stage_report:
+
+    ; Back to listening: a host that exits when its client goes away leaves the tablet stuck on the
+    ; last frame with nothing to reconnect to. Set the whole pipeline up again and serve the next one.
+    jmp     serve_again
 
     mov     rcx, logHandle
     call    CloseHandle
