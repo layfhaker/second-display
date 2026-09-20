@@ -1397,7 +1397,10 @@ cap_frame_begin:
     call    mark_start
     mov     rcx, pDup
     mov     rax, [rcx]
-    mov     edx, 5000
+    mov     edx, 16                        ; a short wait: a static display is the normal case, and a
+                                           ; 5 second timeout throttled the loop to a frame every few
+                                           ; seconds. The timeout path re-feeds the last frame, so the
+                                           ; stream keeps flowing at capture speed either way.
     lea     r8, frameInfo
     lea     r9, pRes
     call    qword ptr [rax+64]
