@@ -346,6 +346,13 @@ hnsPts    dq ?                 ; next sample time
 feedFails dd ?                 ; consecutive ProcessInput failures
 haveFrame dd ?                 ; 1 once the capture stage stashed a real NV12 frame
 streamSock dd ?                ; the client kept alive for streaming (0 = nobody connected)
+; ---- live loop (one long-lived capture+encode cycle instead of the finite probes) ----
+liveMode   dd ?                ; 1 = the encoder is set up once and pumped per captured frame
+liveFrames dd ?                ; how many frames the live loop streams before it stops
+liveCount  dd ?                ; frames the live loop has streamed so far
+pumpCap    dd ?                ; event-poll iterations one pump call may spend before giving up
+pumpDrained dd ?               ; frames this pump call has drained (live mode stops after one)
+ptsStep    dd ?                ; how much the sample time advances per fed frame (100 ns units)
 sendPtr   dq ?                 ; Annex-B payload currently being sent
 sendLen   dd ?
 sentFrames dd ?
@@ -1333,6 +1340,7 @@ cp_have_dup:
     lea     rcx, szCrLf
     call    emit_z
 
+cap_frame_begin:
     ; ---- AcquireNextFrame(5000, &frameInfo, &resource) ----
     mov     rcx, pDup
     mov     rax, [rcx]
@@ -1723,9 +1731,12 @@ vp_copy_bdone:
 vp_copy_done:
     pop     rdi
     pop     rsi
+    mov     dword ptr [haveFrame], 1
+    cmp     dword ptr [liveMode], 0
+    jne     cap_frame_logged               ; live mode: no per-frame chatter in the log
     lea     rcx, szVpCopyDone
     call    emit_z
-    mov     dword ptr [haveFrame], 1
+cap_frame_logged:
 
     mov     rcx, pContext
     mov     rax, [rcx]
@@ -1733,12 +1744,37 @@ vp_copy_done:
     xor     r8d, r8d
     call    qword ptr [rax+120]            ; Unmap
 
+    cmp     dword ptr [liveMode], 0
+    jne     cap_frame_live
     lea     rcx, szYSum
     mov     edx, ySum
     call    emit_num
     lea     rcx, szUvSum
     mov     edx, uvSum
     call    emit_num
+    jmp     cap_cleanup
+
+cap_frame_live:
+    ; ---- live mode: hand this frame to the encoder and take the next one ----
+    call    run_encoder_loop               ; pump: feeds on need-input, drains and sends on have-output
+    inc     dword ptr [liveCount]
+    mov     eax, liveCount
+    cmp     eax, liveFrames
+    jae     cap_frame_done
+    cmp     dword ptr [streamSock], 0      ; the client went away
+    je      cap_frame_done
+    call    cap_release_frame
+    jmp     cap_frame_begin
+
+cap_frame_done:
+    ; Let the client drain what is still queued instead of losing it to an abortive close.
+    mov     ecx, streamSock
+    test    ecx, ecx
+    jz      cap_frame_cleanup
+    mov     edx, 1                         ; SD_SEND
+    call    shutdown
+    mov     dword ptr [streamSock], 0
+cap_frame_cleanup:
     jmp     cap_cleanup
 
 cp_out_next:
@@ -1901,6 +1937,54 @@ cap_no_dup:
     pop     r12
     ret
 run_capture_probe endp
+
+; Release what a single captured frame owns and hand the desktop image back to DXGI. The device, the
+; duplication and the output stay up, so the live loop can take the next frame straight away. This is
+; the per-frame half of the teardown below; Clobbers rax/rcx/rdx.
+cap_release_frame proc
+    sub     rsp, 28h
+    mov     rcx, pRes
+    call    rel_if
+    mov     qword ptr [pRes], 0
+    mov     rcx, pTex
+    call    rel_if
+    mov     qword ptr [pTex], 0
+    mov     rcx, pStaging
+    call    rel_if
+    mov     qword ptr [pStaging], 0
+    mov     rcx, pNv12Stg
+    call    rel_if
+    mov     qword ptr [pNv12Stg], 0
+    mov     rcx, pNv12View
+    call    rel_if
+    mov     qword ptr [pNv12View], 0
+    mov     rcx, pNv12Tex
+    call    rel_if
+    mov     qword ptr [pNv12Tex], 0
+    mov     rcx, pVpInView
+    call    rel_if
+    mov     qword ptr [pVpInView], 0
+    mov     rcx, pVpProc
+    call    rel_if
+    mov     qword ptr [pVpProc], 0
+    mov     rcx, pVpEnum
+    call    rel_if
+    mov     qword ptr [pVpEnum], 0
+    mov     rcx, pVideoContext
+    call    rel_if
+    mov     qword ptr [pVideoContext], 0
+    mov     rcx, pVideoDevice
+    call    rel_if
+    mov     qword ptr [pVideoDevice], 0
+    mov     rcx, pDup
+    test    rcx, rcx
+    jz      crf_done
+    mov     rax, [rcx]
+    call    qword ptr [rax+112]            ; ReleaseFrame
+crf_done:
+    add     rsp, 28h
+    ret
+cap_release_frame endp
 
 ; Release a COM interface if the pointer is non-null: rcx = pointer. Clobbers rax/rdx.
 rel_if proc
@@ -2178,6 +2262,8 @@ mf_in_set:
     jnz     mf_msg_fail
     lea     rcx, szMfReady
     call    emit_z
+    cmp     dword ptr [liveMode], 0
+    jne     enc_done                       ; live mode: keep the transform - the pump still needs it
     call    run_encoder_loop
     jmp     enc_cleanup
 
@@ -2443,6 +2529,9 @@ run_encoder_loop proc
     push    r13
     sub     rsp, 88h
 
+    cmp     dword ptr [liveMode], 0
+    jne     el_live_head
+    mov     dword ptr [pumpCap], 4000
     mov     qword ptr [pEventGen], 0
     mov     qword ptr [pEvent], 0
     mov     dword ptr [encFrames], 0
@@ -2464,13 +2553,36 @@ run_encoder_loop proc
     call    emit_num
     jmp     el_done
 
+el_live_head:
+    ; Live mode: the encoder was set up once, so the event generator and the stream counters have to
+    ; survive from call to call. This call only pumps events, and it stops after one drained frame so
+    ; that the capture loop can hand over the next one.
+    mov     dword ptr [pumpDrained], 0
+    cmp     qword ptr [pEventGen], 0
+    jne     el_live_ready
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    lea     rdx, iidIMFMEGen
+    lea     r8, pEventGen
+    call    qword ptr [rax+0]              ; QI(IMFMediaEventGenerator)
+    test    eax, eax
+    jz      el_live_ready
+    mov     edx, eax
+    lea     rcx, szEncQiGen
+    call    emit_num
+    jmp     el_done
+
+el_live_ready:
+    xor     r12d, r12d
+    jmp     el_loop
+
 el_have_gen:
     ; The MFT is asynchronous: it must be fed only after it asks with METransformNeedInput.
     mov     qword ptr [hnsPts], 0
 
     xor     r12d, r12d
 el_loop:
-    cmp     r12d, 4000
+    cmp     r12d, pumpCap
     jae     el_done
     inc     r12d
 
@@ -2516,17 +2628,29 @@ el_got_event:
 el_need_input:
     mov     rcx, qword ptr [hnsPts]
     call    feed_nv12_frame
-    add     qword ptr [hnsPts], 333333
+    mov     eax, ptsStep
+    add     dword ptr [hnsPts], eax        ; the low dword is enough - carrying would take hours
     cmp     dword ptr [feedFails], 5       ; the MFT is rejecting everything: stop hammering it
     jae     el_done
     jmp     el_loop
 
 el_have_output:
     call    drain_one_frame
+    inc     dword ptr [pumpDrained]
+    cmp     dword ptr [liveMode], 0
+    jne     el_live_drained
     cmp     dword ptr [encFrames], 3
+    jb      el_loop
+    jmp     el_done
+
+el_live_drained:
+    ; Live mode: one drained frame per call is the handover point back to the capture loop.
+    cmp     dword ptr [pumpDrained], 1
     jb      el_loop
 
 el_done:
+    cmp     dword ptr [liveMode], 0
+    jne     el_cleanup
     lea     rcx, szEncFrames
     mov     edx, encFrames
     call    emit_num
@@ -2657,14 +2781,19 @@ mainCRTStartup proc
     ; ---- TCP handshake self-test ----
     call    run_tcp_selftest
 
-    ; ---- Desktop Duplication capture probe ----
-    call    run_capture_probe
+    ; ---- live loop: one encoder, one long-lived capture, frames handed over as they arrive ----
+    mov     dword ptr [liveMode], 1
+    mov     dword ptr [liveFrames], 90
+    mov     dword ptr [liveCount], 0
+    mov     dword ptr [pumpCap], 12
+    mov     dword ptr [ptsStep], 166667     ; the virtual display presents at 60 Hz
+    call    run_encoder_probe               ; live mode: this call only sets the encoder up
 
     ; ---- DXGI adapter/output probe ----
     call    run_dxgi_probe
 
-    ; ---- Media Foundation HEVC encoder probe ----
-    call    run_encoder_probe
+    ; ---- Desktop Duplication capture: the live capture+encode cycle ----
+    call    run_capture_probe
 
     mov     rcx, logHandle
     call    CloseHandle
