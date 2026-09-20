@@ -2604,8 +2604,15 @@ feed_nv12_frame proc
     sub     rsp, 50h
     mov     r12, rcx
 
-    mov     qword ptr [pInBuf], 0
+    ; Release the previous frame's buffer and sample first: this runs on every feed, and leaving them
+    ; behind leaked a 3.7 MB NV12 buffer plus its sample per frame - that is what drove the machine to
+    ; 95% RAM. Our own input objects are ours to free; only the MFT's output sample is untouchable.
+    mov     rcx, qword ptr [pInSample]
+    call    rel_if
     mov     qword ptr [pInSample], 0
+    mov     rcx, qword ptr [pInBuf]
+    call    rel_if
+    mov     qword ptr [pInBuf], 0
 
     mov     ecx, 3686400                   ; 1920x1280 NV12 = luma + half-size chroma
     lea     rdx, pInBuf
