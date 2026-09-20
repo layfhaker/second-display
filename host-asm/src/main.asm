@@ -114,7 +114,7 @@ szHWrite  db "writeH=", 0
 szWsaFail db "WSAStartup failed", 13, 10, 0
 szSockFail db "socket() failed", 13, 10, 0
 szBindFail db "bind() failed wsa=", 0
-szListenOk db "TCP listening on 0.0.0.0:27316", 13, 10, 0
+szListenOk db "TCP listening on 0.0.0.0:27315", 13, 10, 0
 szNoClient db "no client within 15s", 13, 10, 0
 szClient  db "TCP client connected", 13, 10, 0
 szPktType db "packet type=", 0
@@ -709,7 +709,7 @@ sock_ok:
 
     ; ---- bind(s, &sockaddr_in{AF_INET, htons(27315), INADDR_ANY}, 16) ----
     mov     word ptr [sa2], AF_INET
-    mov     eax, SELFTEST_PORT
+    mov     eax, PORT
     xchg    al, ah                 ; htons
     mov     word ptr [sa2+2], ax
     mov     dword ptr [sa2+4], 0   ; INADDR_ANY
@@ -3032,7 +3032,7 @@ mainCRTStartup proc
 
     ; ---- live loop: one encoder, one long-lived capture, frames handed over as they arrive ----
     mov     dword ptr [liveMode], 1
-    mov     dword ptr [liveFrames], 90
+    mov     dword ptr [liveFrames], 20000
     mov     dword ptr [liveCount], 0
     mov     dword ptr [pumpCap], 12
     mov     dword ptr [ptsStep], 166667     ; the virtual display presents at 60 Hz
