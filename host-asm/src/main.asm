@@ -1051,7 +1051,10 @@ run_dxgi_probe proc
     push    r13
     sub     rsp, 68h
 
-    call    release_previous_capture
+    ; NOTE: the capture cannot be released here. The encoder probe runs first and hands the D3D11
+    ; device to the MFT, so dropping the device at this point releases it under the live encoder - the
+    ; host died about half a minute in with exactly this call in place. The capture stage has to be
+    ; released before the encoder is built, which is where the session teardown belongs.
 
     ; ---- CoInitializeEx(NULL, COINIT_MULTITHREADED) ----
     xor     ecx, ecx
@@ -3183,6 +3186,10 @@ mainCRTStartup proc
 
     ; ---- TCP handshake: listen, take one client, answer READY ----
 serve_again:
+    ; Old capture first, then the new device, then the encoder that is handed it: the encoder probe used
+    ; to run before the DXGI probe and so took the previous session's device, which is why releasing the
+    ; capture afterwards killed the host and why each session kept a whole device and duplication alive.
+    call    release_previous_capture
     call    run_tcp_selftest
 
     ; ---- live loop: one encoder, one long-lived capture, frames handed over as they arrive ----
@@ -3191,10 +3198,8 @@ serve_again:
     mov     dword ptr [liveCount], 0
     mov     dword ptr [pumpCap], 12
     mov     dword ptr [ptsStep], 166667     ; the virtual display presents at 60 Hz
+    call    run_dxgi_probe                  ; device and duplication first: the encoder is handed this
     call    run_encoder_probe               ; live mode: this call only sets the encoder up
-
-    ; ---- DXGI adapter/output probe ----
-    call    run_dxgi_probe
 
     ; ---- Desktop Duplication capture: the live capture+encode cycle ----
     lea     rcx, qpcFreq
