@@ -2748,7 +2748,7 @@ ff_have_buf:
     push    rdi
     lea     rsi, nv12Frame                 ; feed what the capture stage produced
     mov     rdi, r11
-    mov     ecx, 3110400
+    mov     ecx, 3686400                   ; 1920x1280 NV12: the old 3110400 only covered luma + half the chroma, leaving the bottom chroma rows zero = green bottom half
     mov     edx, ecx
     shr     ecx, 3
 ff_copy_q:
@@ -2798,7 +2798,7 @@ ff_sum_done:
     call    qword ptr [rax+32]             ; Unlock
     mov     rcx, pInBuf
     mov     rax, [rcx]
-    mov     edx, 3110400
+    mov     edx, 3686400                   ; full 1920x1280 NV12: only the copied length is valid input
     call    qword ptr [rax+48]             ; SetCurrentLength
 
     lea     rcx, pInSample
