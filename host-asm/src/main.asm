@@ -91,6 +91,8 @@ EXTERN MFTEnumEx:PROC
 EXTERN MFCreateMediaType:PROC
 EXTERN MFCreateSample:PROC
 EXTERN MFCreateMemoryBuffer:PROC
+EXTERN MFCreateDXGIDeviceManager:PROC
+EXTERN MFCreateDXGISurfaceBuffer:PROC
 EXTERN CoTaskMemFree:PROC
 
 .data
@@ -246,6 +248,8 @@ szMfOutSize  db "MF: output stream cbSize=", 0
 szMfSupplies db "MF: provides_samples=", 0
 szMfMsg      db "MF: ProcessMessage hr=", 0
 szMfReady    db "MF: encoder configured (HEVC <- NV12)", 13, 10, 0
+szMfManager  db "MF: D3D manager setup hr=", 0
+szMfManagerOk db "MF: D3D manager handed to the encoder", 13, 10, 0
 
 szEncQiGen   db "MF: QI(IMFMediaEventGenerator) hr=", 0
 szEncBuf     db "MF: MFCreateMemoryBuffer hr=", 0
@@ -335,6 +339,8 @@ pActivates dq ?                ; IMFActivate** returned by MFTEnumEx
 mftCount  dd ?
 pActivate dq ?                 ; IMFActivate*
 pTransform dq ?                ; IMFTransform*
+pDevManager dq ?               ; IMFDXGIDeviceManager* handed to the encoder
+mfDevToken dd ?                ; its reset token
 pEventGen dq ?                 ; IMFMediaEventGenerator* (QI of the transform)
 pAttrs    dq ?                 ; IMFAttributes* of the transform
 pOutType  dq ?                 ; IMFMediaType* (HEVC)
@@ -2384,6 +2390,9 @@ emit_stage_report endp
 ; without ever letting the old one go. Left alone, that is megabytes per frame of growth.
 release_previous_encoder proc
     sub     rsp, 28h
+    mov     rcx, pDevManager
+    call    rel_if
+    mov     qword ptr [pDevManager], 0
     mov     rcx, pInSample
     call    rel_if
     mov     qword ptr [pInSample], 0
@@ -2514,6 +2523,38 @@ mf_got_attrs:
     lea     rdx, mfLowLatency
     mov     r8d, 1
     call    qword ptr [rax+168]            ; MF_LOW_LATENCY
+
+    ; ---- hand our D3D11 device to the encoder: the frame then travels as a texture ----
+    ; This is the path the Rust host uses and the reason its colours are right: no CPU readback, no
+    ; hand-copied planes. It has to happen before the types are set, exactly as in the C# reference.
+    mov     dword ptr [mfDevToken], 0
+    lea     rcx, mfDevToken
+    lea     rdx, pDevManager
+    call    MFCreateDXGIDeviceManager
+    test    eax, eax
+    jnz     mf_manager_fail
+    mov     rcx, pDevManager
+    mov     rax, [rcx]
+    mov     rdx, pDevice
+    mov     r8d, mfDevToken
+    call    qword ptr [rax+24]             ; IMFDXGIDeviceManager::ResetDevice
+    test    eax, eax
+    jnz     mf_manager_fail
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    mov     edx, 10000004h                 ; MFT_MESSAGE_SET_D3D_MANAGER
+    mov     r8, pDevManager
+    call    qword ptr [rax+184]            ; IMFTransform::ProcessMessage
+    test    eax, eax
+    jnz     mf_manager_fail
+    lea     rcx, szMfManagerOk
+    call    emit_z
+    jmp     mf_manager_done
+mf_manager_fail:
+    mov     edx, eax
+    lea     rcx, szMfManager
+    call    emit_num
+mf_manager_done:
 
     ; ---- output type: HEVC 1920x1280 @30, 30 Mbps ----
     lea     rcx, pOutType
