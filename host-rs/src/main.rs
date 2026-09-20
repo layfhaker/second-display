@@ -206,6 +206,41 @@ fn commit_mb() -> Option<u64> {
     }
 }
 
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+/// Counts live Rust-heap bytes so we can tell our own allocations apart from memory that MF, D3D11
+/// or the driver commits behind our back (which is where the streaming leak is suspected to live).
+struct CountingAlloc;
+
+static LIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        let p = unsafe { std::alloc::System.alloc(l) };
+        if !p.is_null() {
+            LIVE_BYTES.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        LIVE_BYTES.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, new: usize) -> *mut u8 {
+        let np = unsafe { std::alloc::System.realloc(p, l, new) };
+        if !np.is_null() {
+            LIVE_BYTES.fetch_add(new, std::sync::atomic::Ordering::Relaxed);
+            LIVE_BYTES.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        }
+        np
+    }
+}
+
+fn live_mb() -> u64 {
+    (LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed) as u64) / (1024 * 1024)
+}
+
 /// The host leaks a few MB of committed memory per frame while streaming (still being narrowed
 /// down), so it grows without bound and eventually starves the whole machine - it has taken Windows
 /// down with it. Until that leak is fixed, watch our own commit and exit so the scheduled task
@@ -213,20 +248,27 @@ fn commit_mb() -> Option<u64> {
 const COMMIT_LIMIT_MB: u64 = 8000;
 
 fn start_memory_watchdog() {
+    let mut ticks = 0u32;
     let _ = std::thread::Builder::new()
         .name("MemWatchdog".into())
-        .spawn(|| loop {
+        .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
-            if let Some(mb) = commit_mb() {
-                if mb > COMMIT_LIMIT_MB {
-                    // Straight to the file: the normal logger is asynchronous and would drop this.
-                    log::log_sync(&format!(
-                        "Host commit hit {mb} MB (limit {COMMIT_LIMIT_MB} MB) - exiting so the task restarts us clean"
-                    ));
-                    // Non-zero on purpose: the scheduled task is configured to restart the host on
-                    // failure. A plain exit(0) looks like success and nothing would bring us back.
-                    std::process::exit(1);
-                }
+            ticks += 1;
+            let Some(mb) = commit_mb() else { continue };
+            // Every minute: commit vs live Rust heap. If commit climbs while the heap stays flat, the
+            // growth is outside our allocator (Media Foundation / D3D11 / the driver).
+            if ticks % 6 == 0 {
+                logline!("[mem] commit {mb} MB, rust heap {} MB", live_mb());
+            }
+            if mb > COMMIT_LIMIT_MB {
+                // Straight to the file: the normal logger is asynchronous and would drop this.
+                log::log_sync(&format!(
+                    "Host commit hit {mb} MB (limit {COMMIT_LIMIT_MB} MB), rust heap {} MB - exiting so the task restarts us clean",
+                    live_mb()
+                ));
+                // Non-zero on purpose: the scheduled task is configured to restart the host on
+                // failure. A plain exit(0) looks like success and nothing would bring us back.
+                std::process::exit(1);
             }
         });
 }
