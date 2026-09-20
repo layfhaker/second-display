@@ -175,16 +175,22 @@ impl GpuColorConverter {
                 .VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&full_out));
         }
 
-        let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+        let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: true.into(),
             pInputSurface: std::mem::ManuallyDrop::new(Some(view)),
             ..Default::default()
-        };
-        unsafe {
+        }];
+        let res = unsafe {
             self.video_context
-                .VideoProcessorBlt(&self.processor, &self.out_views[slot], 0, &[stream])
-                .map_err(|e| e.to_string())?;
-        }
+                .VideoProcessorBlt(&self.processor, &self.out_views[slot], 0, &streams)
+                .map_err(|e| e.to_string())
+        };
+        // The stream carries a reference to the input view: take it back after the blit. Leaking it
+        // (which is what ManuallyDrop did here) keeps a reference on every duplication surface, so the
+        // driver can never reuse one and allocates a fresh surface per frame - the host grew to tens
+        // of GB of commit and starved the whole system.
+        unsafe { std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurface) };
+        res?;
         Ok(self.nv12[slot].clone())
     }
 }

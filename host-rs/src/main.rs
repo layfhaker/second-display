@@ -87,6 +87,7 @@ fn main() {
 
     log::init(&log::default_log_path());
     logline!("SecondDisplay Host (Rust) v{}", env!("CARGO_PKG_VERSION"));
+    start_memory_watchdog();
     logline!("=================================================");
 
     let opts = Options::from_args(&args);
@@ -157,6 +158,75 @@ unsafe fn set_high_priority() {
     unsafe {
         let _ = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     }
+}
+
+#[repr(C)]
+struct ProcessMemoryCounters {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+}
+
+#[link(name = "psapi")]
+unsafe extern "system" {
+    fn GetProcessMemoryInfo(
+        process: *mut core::ffi::c_void,
+        counters: *mut ProcessMemoryCounters,
+        cb: u32,
+    ) -> i32;
+}
+
+/// Committed bytes of this process, in MB.
+fn commit_mb() -> Option<u64> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut c = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess().0, &mut c, c.cb) };
+    if ok == 0 {
+        None
+    } else {
+        Some((c.pagefile_usage as u64) / (1024 * 1024))
+    }
+}
+
+/// The host leaks a few MB of committed memory per frame while streaming (still being narrowed
+/// down), so it grows without bound and eventually starves the whole machine - it has taken Windows
+/// down with it. Until that leak is fixed, watch our own commit and exit so the scheduled task
+/// restarts us with a clean process: a brief reconnect beats an unusable desktop.
+const COMMIT_LIMIT_MB: u64 = 8000;
+
+fn start_memory_watchdog() {
+    let _ = std::thread::Builder::new()
+        .name("MemWatchdog".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            if let Some(mb) = commit_mb() {
+                if mb > COMMIT_LIMIT_MB {
+                    // Straight to the file: the normal logger is asynchronous and would drop this.
+                    log::log_sync(&format!(
+                        "Host commit hit {mb} MB (limit {COMMIT_LIMIT_MB} MB) - exiting so the task restarts us clean"
+                    ));
+                    std::process::exit(0);
+                }
+            }
+        });
 }
 
 /// Feed synthetic NV12 frames through the MF HEVC encoder (no capture, no port, no mutex).

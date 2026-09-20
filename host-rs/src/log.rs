@@ -15,6 +15,7 @@ struct Entry {
 }
 
 static SENDER: OnceLock<Sender<Entry>> = OnceLock::new();
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Default log path: `%LOCALAPPDATA%\SecondDisplay\host.log`.
 pub fn default_log_path() -> PathBuf {
@@ -22,6 +23,23 @@ pub fn default_log_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base.join("SecondDisplay").join("host.log")
+}
+
+/// Write one line straight to the log file, bypassing the writer thread. Anything logged just before
+/// the process exits (the memory watchdog does exactly that) would otherwise be dropped with the
+/// queued entries, leaving a restart with no explanation in the log.
+pub fn log_sync(msg: &str) {
+    let Some(path) = LOG_PATH.get() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[exit @{now}] {msg}");
+        let _ = f.flush();
+    }
 }
 
 /// Start the background logger. The previous run's file is kept as `<name>.prev` so a crash can
@@ -46,6 +64,7 @@ pub fn init(path: &PathBuf) {
         .open(path)
         .or_else(|_| OpenOptions::new().create(true).append(true).open(path))
         .expect("open log file");
+    let _ = LOG_PATH.set(path.clone());
 
     let (tx, rx) = mpsc::channel::<Entry>();
     let _ = SENDER.set(tx);
