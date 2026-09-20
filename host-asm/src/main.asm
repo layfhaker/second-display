@@ -2542,7 +2542,7 @@ mf_got_attrs:
     jnz     mf_manager_fail
     mov     rcx, pTransform
     mov     rax, [rcx]
-    mov     edx, 10000004h                 ; MFT_MESSAGE_SET_D3D_MANAGER
+    mov     edx, 2                          ; MFT_MESSAGE_SET_D3D_MANAGER (mftransform.h line 174)
     mov     r8, pDevManager
     call    qword ptr [rax+184]            ; IMFTransform::ProcessMessage
     test    eax, eax
