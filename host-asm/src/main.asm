@@ -74,6 +74,7 @@ EXTERN accept:PROC
 EXTERN recv:PROC
 EXTERN send:PROC
 EXTERN closesocket:PROC
+EXTERN shutdown:PROC
 
 ; ---- COM imports (ole32 / dxgi) ----
 EXTERN CoInitializeEx:PROC
@@ -2549,6 +2550,15 @@ el_done:
     lea     rcx, szStreamTotB
     mov     edx, sentBytes
     call    emit_num
+
+    ; Flush the stream: FIN after the queued frames instead of tearing the socket down mid-flight
+    ; (an abortive close discards what the client has not read yet).
+    mov     ecx, streamSock
+    test    ecx, ecx
+    jz      el_cleanup
+    mov     edx, 1                         ; SD_SEND
+    call    shutdown
+    mov     dword ptr [streamSock], 0
 
 el_cleanup:
     mov     rcx, pEvent
