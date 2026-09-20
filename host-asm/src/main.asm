@@ -2987,6 +2987,14 @@ el_loop:
     inc     r12d
 
     mov     rcx, pEventGen
+    test    rcx, rcx
+    jnz     el_gen_ok
+    ; Calling GetEvent through a null interface pointer is a wild jump - which is exactly what the crash
+    ; dumps show (BEX64, faulting module "unknown", offset 0xe). Fail loudly instead of jumping to 0.
+    lea     rcx, szEncQiGen
+    call    emit_z
+    jmp     el_done
+el_gen_ok:
     mov     rax, [rcx]
     mov     edx, 1                         ; MF_EVENT_FLAG_NO_WAIT
     lea     r8, pEvent
