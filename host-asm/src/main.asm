@@ -1013,10 +1013,45 @@ payload_is_keyframe endp
 ;   IDXGIAdapter:              56 = EnumOutputs,   64 = GetDesc
 ;   IDXGIOutput:               56 = GetDesc
 ;   IUnknown:                  16 = Release
+; Release the capture stage a previous session left behind. Every serve cycle builds its own D3D11
+; device, DXGI factory and duplication, and without this the memory grew in steps of a few hundred
+; megabytes - one step per session - even after the per-frame objects were handled.
+release_previous_capture proc
+    sub     rsp, 28h
+    mov     rcx, pDup
+    call    rel_if
+    mov     qword ptr [pDup], 0
+    mov     rcx, pOutput1
+    call    rel_if
+    mov     qword ptr [pOutput1], 0
+    mov     rcx, pOutput
+    call    rel_if
+    mov     qword ptr [pOutput], 0
+    mov     rcx, pAdapter
+    call    rel_if
+    mov     qword ptr [pAdapter], 0
+    mov     rcx, pDxgiDevice
+    call    rel_if
+    mov     qword ptr [pDxgiDevice], 0
+    mov     rcx, pFactory
+    call    rel_if
+    mov     qword ptr [pFactory], 0
+    mov     rcx, pContext
+    call    rel_if
+    mov     qword ptr [pContext], 0
+    mov     rcx, pDevice
+    call    rel_if
+    mov     qword ptr [pDevice], 0
+    add     rsp, 28h
+    ret
+release_previous_capture endp
+
 run_dxgi_probe proc
     push    r12
     push    r13
     sub     rsp, 68h
+
+    call    release_previous_capture
 
     ; ---- CoInitializeEx(NULL, COINIT_MULTITHREADED) ----
     xor     ecx, ecx
