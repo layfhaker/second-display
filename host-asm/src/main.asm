@@ -1808,20 +1808,7 @@ vp_copy:
     cmp     r8d, edx
     jae     vp_copy_done
     mov     eax, r8d
-    ; Luma rows sit RowPitch apart in the staging texture, but its chroma plane is laid out with rows
-    ; W apart (RowPitch is padded). A single flat pitch for both planes drifts the chroma further off
-    ; with every row, which is what turned the lower half of the picture green on the tablet.
-    cmp     eax, dword ptr [capH]
-    jae     vp_src_chroma
-    imul    eax, r10d                      ; luma row * rowPitch
-    jmp     vp_src_ready
-vp_src_chroma:
-    sub     eax, dword ptr [capH]          ; chroma row index
-    imul    eax, r9d                       ; * W
-    mov     ecx, dword ptr [capH]
-    imul    ecx, r10d                      ; RowPitch * H = start of the chroma plane
-    add     eax, ecx
-vp_src_ready:
+    imul    eax, r10d                      ; row * rowPitch
     lea     rsi, [r11+rax]
     mov     eax, r8d
     imul    eax, r9d                       ; row * width
