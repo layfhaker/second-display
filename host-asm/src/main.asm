@@ -1302,20 +1302,20 @@ cp_out_loop:
     mov     edx, dword ptr [outDesc+80]   ; AttachedToDesktop
     call    emit_num
 
-    ; output size from DXGI_OUTPUT_DESC::DesktopCoordinates
+    ; Candidate size from DXGI_OUTPUT_DESC::DesktopCoordinates. Only the display whose mode is the
+    ; one we stream becomes the capture source, and it must be the one that sets capW/capH: assigning
+    ; them before the check let a later enumerated output overwrite the accepted one, which is what
+    ; cut the desktop off at the wrong row and left the rest of the frame zero (green on the tablet).
     mov     eax, dword ptr [outDesc+72]
     sub     eax, dword ptr [outDesc+64]
+    mov     ecx, dword ptr [outDesc+76]
+    sub     ecx, dword ptr [outDesc+68]
+    cmp     eax, 1920
+    jne     cp_out_next
+    cmp     ecx, 1280
+    jne     cp_out_next
     mov     capW, eax
-    mov     eax, dword ptr [outDesc+76]
-    sub     eax, dword ptr [outDesc+68]
-    mov     capH, eax
-
-    ; Take the display the tablet is shown, not whatever DXGI lists first: that is the virtual
-    ; display, and its mode is the one we encode. The physical primary would only mirror the desktop.
-    cmp     capW, 1920
-    jne     cp_out_next
-    cmp     capH, 1280
-    jne     cp_out_next
+    mov     capH, ecx
 
     ; ---- IDXGIOutput1 (a prerequisite for DuplicateOutput) ----
     mov     rcx, pOutput
@@ -1808,7 +1808,20 @@ vp_copy:
     cmp     r8d, edx
     jae     vp_copy_done
     mov     eax, r8d
-    imul    eax, r10d                      ; row * rowPitch
+    ; Luma rows sit RowPitch apart in the staging texture, but its chroma plane is laid out with rows
+    ; W apart (RowPitch is padded). A single flat pitch for both planes drifts the chroma further off
+    ; with every row, which is what turned the lower half of the picture green on the tablet.
+    cmp     eax, dword ptr [capH]
+    jae     vp_src_chroma
+    imul    eax, r10d                      ; luma row * rowPitch
+    jmp     vp_src_ready
+vp_src_chroma:
+    sub     eax, dword ptr [capH]          ; chroma row index
+    imul    eax, r9d                       ; * W
+    mov     ecx, dword ptr [capH]
+    imul    ecx, r10d                      ; RowPitch * H = start of the chroma plane
+    add     eax, ecx
+vp_src_ready:
     lea     rsi, [r11+rax]
     mov     eax, r8d
     imul    eax, r9d                       ; row * width
