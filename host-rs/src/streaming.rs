@@ -100,7 +100,7 @@ impl StreamingSession {
                         did = true;
                     }
                     while let Some(k) = input_server.poll_key() {
-                        input::inject_key(k.action, k.key_code);
+                        input::inject_key(k.action, k.key_code, k.scan_code, k.meta_state);
                         did = true;
                     }
                     if !did {
