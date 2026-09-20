@@ -189,6 +189,8 @@ szVpOView  db "VPP: CreateVideoProcessorOutputView hr=", 0
 szVpIView  db "VPP: CreateVideoProcessorInputView hr=", 0
 szVpBlt    db "VPP: VideoProcessorBlt hr=", 0
 szVpStg    db "VPP: NV12 staging CreateTexture2D hr=", 0
+szVpBgra   db "VPP: BGRA CreateTexture2D hr=", 0
+szLiveFrame db "live frame #", 13, 10, 0
 szVpMap    db "VPP: NV12 Map hr=", 0
 szVpOk     db "VPP: BGRA->NV12 blt ok", 13, 10, 0
 szVpCopyDone db "VPP: NV12 frame captured", 13, 10, 0
@@ -354,6 +356,8 @@ pumpCap    dd ?                ; event-poll iterations one pump call may spend b
 pumpDrained dd ?               ; frames this pump call has drained (live mode stops after one)
 ptsStep    dd ?                ; how much the sample time advances per fed frame (100 ns units)
 feedToggle dd ?                ; flips per captured frame so only every other one is encoded
+vppReady   dd ?                ; 1 once the video-processor objects exist and can be reused
+pBgraTex   dq ?                ; our own BGRA texture the video processor reads from every frame
 sendPtr   dq ?                 ; Annex-B payload currently being sent
 sendLen   dd ?
 sentFrames dd ?
@@ -1361,6 +1365,25 @@ cap_frame_begin:
     test    eax, eax
     jnz     cap_acq_fail
 
+    ; Trace the first few live frames: enough to see how far the cycle gets without flooding the log.
+    cmp     dword ptr [liveMode], 0
+    je      cap_trace_done
+    mov     eax, liveCount
+    cmp     eax, 4
+    jae     cap_trace_done
+    lea     rcx, szLiveFrame
+    mov     edx, eax
+    call    emit_num
+cap_trace_done:
+
+    ; Live mode skips the CPU-side copy and checksum, and reuses the video-processor objects built on
+    ; the first frame: a frame then costs one GPU copy, one Blt and one NV12 readback.
+    cmp     dword ptr [liveMode], 0
+    je      cap_staging_probe
+    cmp     dword ptr [vppReady], 0
+    je      cap_vpp_setup
+    jmp     cap_after_setup
+cap_staging_probe:
     ; ---- staging texture: the CPU-readable BGRA copy ----
     lea     r10, texDesc
     mov     eax, capW
@@ -1447,6 +1470,7 @@ cap_sum_done:
     xor     r8d, r8d
     call    qword ptr [rax+120]
 
+cap_vpp_setup:
     ; ================= D3D11 VideoProcessor: BGRA -> NV12 =================
     mov     rcx, pDevice
     mov     rax, [rcx]
@@ -1562,6 +1586,31 @@ cap_sum_done:
     test    eax, eax
     jnz     vp_oview_fail
 
+    ; Our own BGRA texture: the video processor reads from this one, so its input view can be created
+    ; once and reused - each frame copies the freshly acquired desktop image into it.
+    lea     r10, texDesc
+    mov     eax, capW
+    mov     dword ptr [r10], eax
+    mov     eax, capH
+    mov     dword ptr [r10+4], eax
+    mov     dword ptr [r10+8], 1           ; MipLevels
+    mov     dword ptr [r10+12], 1          ; ArraySize
+    mov     dword ptr [r10+16], 87         ; DXGI_FORMAT_B8G8R8A8_UNORM
+    mov     dword ptr [r10+20], 1          ; SampleDesc.Count
+    mov     dword ptr [r10+24], 0          ; SampleDesc.Quality
+    mov     dword ptr [r10+28], 0          ; D3D11_USAGE_DEFAULT
+    mov     dword ptr [r10+32], 20h        ; D3D11_BIND_RENDER_TARGET (a VP input view needs it)
+    mov     dword ptr [r10+36], 0          ; CPUAccessFlags
+    mov     dword ptr [r10+40], 0          ; MiscFlags
+    mov     rcx, pDevice
+    mov     rax, [rcx]
+    lea     rdx, texDesc
+    xor     r8d, r8d
+    lea     r9, pBgraTex
+    call    qword ptr [rax+40]             ; CreateTexture2D
+    test    eax, eax
+    jnz     vp_bgra_fail
+
     lea     r10, vpInDesc
     mov     qword ptr [r10], 0
     mov     qword ptr [r10+8], 0
@@ -1569,7 +1618,7 @@ cap_sum_done:
     mov     dword ptr [r10+4], 1           ; D3D11_VPIV_DIMENSION_TEXTURE2D
     mov     rcx, pVideoDevice
     mov     rax, [rcx]
-    mov     rdx, pTex
+    mov     rdx, pBgraTex
     mov     r8, pVpEnum
     lea     r9, vpInDesc
     lea     r10, pVpInView
@@ -1577,6 +1626,14 @@ cap_sum_done:
     call    qword ptr [rax+64]             ; CreateVideoProcessorInputView
     test    eax, eax
     jnz     vp_iview_fail
+
+    ; ---- the desktop image the video processor will read this time round ----
+cap_after_setup:
+    mov     rcx, pContext
+    mov     rax, [rcx]
+    mov     rdx, pBgraTex
+    mov     r8, pTex
+    call    qword ptr [rax+376]            ; CopyResource(our BGRA, acquired)
 
     lea     r10, vpStream
     mov     qword ptr [r10], 0
@@ -1630,6 +1687,11 @@ cap_sum_done:
     test    eax, eax
     jnz     vp_stg_fail
 
+    cmp     dword ptr [liveMode], 0
+    je      cap_stg_created
+    mov     dword ptr [vppReady], 1        ; live mode: everything above is now reusable
+cap_stg_created:
+
     mov     rcx, pContext
     mov     rax, [rcx]
     mov     rdx, pNv12Stg
@@ -1647,6 +1709,11 @@ cap_sum_done:
     call    qword ptr [rax+112]            ; Map
     test    eax, eax
     jnz     vp_map_fail
+
+    ; Live mode only needs the pixels: the byte-at-a-time sums below walk the whole frame (3.6M
+    ; iterations) and cost far more than the encode they are meant to prove.
+    cmp     dword ptr [liveMode], 0
+    jne     vp_copy_start
 
     mov     r11, qword ptr [mapped]        ; pData
     mov     r10d, dword ptr [mapped+8]     ; RowPitch
@@ -1683,6 +1750,7 @@ vp_uvsum:
 vp_uvsum_done:
     mov     uvSum, edx
 
+vp_copy_start:
     ; ---- stash the real NV12 frame for the encoder stage ----
     ; The staging texture's row pitch may exceed the frame width, so rows are copied one by one
     ; (qword at a time, byte tail) instead of one big block.
@@ -1861,6 +1929,11 @@ vp_oview_fail:
     lea     rcx, szVpOView
     call    emit_num
     jmp     cap_cleanup
+vp_bgra_fail:
+    mov     edx, eax
+    lea     rcx, szVpBgra
+    call    emit_num
+    jmp     cap_cleanup
 vp_iview_fail:
     mov     edx, eax
     lea     rcx, szVpIView
@@ -1951,6 +2024,18 @@ run_capture_probe endp
 ; the per-frame half of the teardown below; Clobbers rax/rcx/rdx.
 cap_release_frame proc
     sub     rsp, 28h
+    ; Live mode keeps the video-processor objects, the NV12 staging texture and the video device
+    ; alive across frames: one frame owns only the acquired desktop image and the duplication lease.
+    cmp     dword ptr [liveMode], 0
+    je      crf_release_all
+    mov     rcx, pRes
+    call    rel_if
+    mov     qword ptr [pRes], 0
+    mov     rcx, pTex
+    call    rel_if
+    mov     qword ptr [pTex], 0
+    jmp     crf_lease
+crf_release_all:
     mov     rcx, pRes
     call    rel_if
     mov     qword ptr [pRes], 0
@@ -1984,6 +2069,7 @@ cap_release_frame proc
     mov     rcx, pVideoDevice
     call    rel_if
     mov     qword ptr [pVideoDevice], 0
+crf_lease:
     mov     rcx, pDup
     test    rcx, rcx
     jz      crf_done
