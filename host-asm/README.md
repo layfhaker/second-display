@@ -38,6 +38,7 @@ d3d11.lib mfplat.lib`. Путь к `vcvars64.bat` зашит в `build.ps1` (VS 
 | M6 | **Захват Desktop Duplication**: `D3D11CreateDevice` → QI `IDXGIOutput1` → `DuplicateOutput` → `AcquireNextFrame` → QI `ID3D11Texture2D` → staging `CreateTexture2D` → `CopyResource` → `Map` → контрольная сумма кадра | `a227b41` |
 | M7a | **GPU BGRA→NV12** через `ID3D11VideoProcessor`: enumerator → processor → NV12 RT-текстура + output view → input view на кадре → `VideoProcessorBlt` → чтение назад по Y/UV | `50b152d` |
 | M7b-1 | **Media Foundation + аппаратный HEVC-энкодер**: `MFStartup` → `MFTEnumEx` → `ActivateObject` → async unlock + low latency → HEVC-выход + NV12-вход → `GetOutputStreamInfo` → `ProcessMessage(BEGIN_STREAMING/START_OF_STREAM)` | `989d594` |
+| M7b-2 | **Асинхронный цикл энкодера**: `GetEvent` (`MF_EVENT_FLAG_NO_WAIT`) → `601 METransformNeedInput` → подача NV12-сэмпла → `602 METransformHaveOutput` → `ProcessOutput` → `ConvertToContiguousBuffer`/`Lock` → готовый Annex-B поток | — |
 
 Живые подтверждения из лога:
 
@@ -50,19 +51,16 @@ capture source: \\.\DISPLAY1 ; capture width=1920 height=1080 rowpitch=7680
 VPP: BGRA->NV12 blt ok ; Y checksum=143194976 ; UV checksum=133314356
 MF: hardware HEVC encoder MFTs found=2 ; provides_samples=256
 MF: encoder configured (HEVC <- NV12)
+MF: encoded frames=3 ; total HEVC bytes=3130 ; first frame bytes=2881 ; HEVC encode OK
 ```
 
-## Следующее (M7b-2 и дальше)
+## Следующее
 
-1. **M7b-2**: асинхронный цикл событий MFT — `GetEvent` с `MF_EVENT_FLAG_NO_WAIT` (блокирующий
-   `GetEvent` вешает цикл), `METransformNeedInput = 601` → подать кадр (`MFCreateSample` +
-   `MFCreateMemoryBuffer`), `METransformHaveOutput = 602` → `ProcessOutput` и вычитать Annex-B.
-   `provides_samples = 0x100`, поэтому в `MFT_OUTPUT_DATA_BUFFER` надо класть `pSample = NULL` и
-   забирать тот сэмпл, который вернёт MFT.
+1. Отправить готовый Annex-B поток в TCP-сессии (сейчас M4 умеет только `HELLO`/`READY`).
 2. Zero-copy вход для энкодера: `MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager` (сейчас в
-   пробе путь через память).
-3. Сессии/оркестратор: сессии TCP, курсор (`CURSOR`), ввод (`TOUCH`/`KEY` через `SendInput`),
-   `PING`-heartbeat, single-instance, CLI (`--auto`/`--display`).
+   пробе путь через память, а кадр для энкодера — синтетический NV12, а не результат VPP).
+3. Сомкнуть тракт: захват (M6) → VPP (M7a) → энкодер (M7b) в один цикл; затем курсор (`CURSOR`),
+   ввод (`TOUCH`/`KEY` через `SendInput`), `PING`-heartbeat, single-instance, CLI (`--auto`/`--display`).
 
 ## Правила работы с COM в этом проекте
 
@@ -102,6 +100,15 @@ MF: encoder configured (HEVC <- NV12)
 - **MF**: `METransformNeedInput = 601`, `METransformHaveOutput = 602` (не 1/2);
   `MF_E_NO_EVENTS_AVAILABLE = 0xC00D3E80`; `GetEvent` — только с `MF_EVENT_FLAG_NO_WAIT`; MF и
   нитку лучше поднимать один раз на процесс (`MFStartup`/`MFShutdown` — не на каждый энкодер).
+- **Асинхронный MFT кормить только по запросу.** `ProcessInput` до первого `METransformNeedInput`
+  даёт `0xC00D36B5` (`MF_E_NOTACCEPTING`) — это нормальный код, а не ошибка (в пробе он не считается
+  сбоем). Если MFT отвечает `E_FAIL` на каждую подачу, он болен (у нас — из-за нездорового
+  GPU/QuickSync): проба считает такие отказы и после 5 подряд прекращает цикл, иначе копится память
+  (`E_OUTOFMEMORY` на `MFCreateMemoryBuffer`).
+- **`provides_samples` (`MFT_OUTPUT_STREAM_PROVIDES_SAMPLES = 0x100`) — владение сэмплом у MFT.**
+  `ProcessOutput` возвращает **его** сэмпл; освобождать его нельзя (это снимает ссылку самого MFT →
+  AV внутри `d3d11`/MF). Рабочий Rust-хост делает `clone()` + drop (AddRef/Release пары) и не
+  трогает ссылку MFT — в асме освобождение пропускается, когда `provides_samples != 0`.
 
 ## Структура `src\main.asm`
 

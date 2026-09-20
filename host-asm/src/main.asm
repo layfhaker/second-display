@@ -58,6 +58,7 @@ EXTERN ReadFile:PROC
 EXTERN WaitForSingleObject:PROC
 EXTERN GetExitCodeProcess:PROC
 EXTERN GetLastError:PROC
+EXTERN Sleep:PROC
 
 ; ---- winsock imports (ws2_32) ----
 EXTERN WSAStartup:PROC
@@ -221,6 +222,18 @@ szMfSupplies db "MF: provides_samples=", 0
 szMfMsg      db "MF: ProcessMessage hr=", 0
 szMfReady    db "MF: encoder configured (HEVC <- NV12)", 13, 10, 0
 
+szEncQiGen   db "MF: QI(IMFMediaEventGenerator) hr=", 0
+szEncBuf     db "MF: MFCreateMemoryBuffer hr=", 0
+szEncSmpl    db "MF: MFCreateSample hr=", 0
+szEncInput   db "MF: ProcessInput hr=", 0
+szEncEvent   db "MF: GetEvent hr=", 0
+szEncOut     db "MF: ProcessOutput hr=", 0
+szEncFrames  db "MF: encoded frames=", 0
+szEncBytes   db "MF: total HEVC bytes=", 0
+szEncFirst   db "MF: first frame bytes=", 0
+szEncFirstSu db "MF: first frame checksum=", 0
+szEncOk      db "MF: HEVC encode OK", 13, 10, 0
+szE2 db "  enc: event type=", 0
 ; IID_ID3D11Device {db6f6ddb-ac77-4e88-8253-819df9bbf140} — first three fields little-endian
 iidD3D11Device db 0DBh,6Dh,6Fh,0DBh,77h,0ACh,88h,4Eh,82h,53h,81h,9Dh,0F9h,0BBh,0F1h,40h
 
@@ -305,6 +318,22 @@ mftOutInfo db 32 dup(?)        ; MFT_OUTPUT_STREAM_INFO {dwFlags, cbSize, cbAlig
 mftRegInfo db 32 dup(?)        ; MFT_REGISTER_TYPE_INFO {guidMajorType, guidSubtype}
 providesSamples dd ?
 outBufSize dd ?
+pEvent    dq ?                 ; IMFMediaEvent* taken off the event queue
+pInBuf    dq ?                 ; IMFMediaBuffer* with one NV12 frame
+pInSample dq ?                 ; IMFSample* wrapping pInBuf
+pContig   dq ?                 ; IMFMediaBuffer* of an encoded sample
+evType    dd ?                 ; MediaEventType of the last event
+bufPtr    dq ?                 ; Lock()ed pointer
+bufMax    dd ?
+bufCur    dd ?
+outStatus dd ?                 ; ProcessOutput status
+odb       db 32 dup(?)         ; MFT_OUTPUT_DATA_BUFFER
+encFrames dd ?
+encBytes  dd ?
+firstSize dd ?
+firstSum  dd ?
+hnsPts    dq ?                 ; next sample time
+feedFails dd ?                 ; consecutive ProcessInput failures
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
 pDup      dq ?                 ; IDXGIOutputDuplication*
@@ -1944,6 +1973,7 @@ mf_in_set:
     jnz     mf_msg_fail
     lea     rcx, szMfReady
     call    emit_z
+    call    run_encoder_loop
     jmp     enc_cleanup
 
 mf_msg_fail:
@@ -1974,6 +2004,323 @@ enc_done:
     pop     r12
     ret
 run_encoder_probe endp
+
+; Feed one synthetic NV12 frame into the encoder: rcx = sample time in 100 ns units.
+feed_nv12_frame proc
+    push    r12
+    sub     rsp, 50h
+    mov     r12, rcx
+
+    mov     qword ptr [pInBuf], 0
+    mov     qword ptr [pInSample], 0
+
+    mov     ecx, 3110400                   ; 1920x1080 NV12 = luma + half-size chroma
+    lea     rdx, pInBuf
+    call    MFCreateMemoryBuffer
+    test    eax, eax
+    jz      ff_have_buf
+    mov     edx, eax
+    lea     rcx, szEncBuf
+    call    emit_num
+    jmp     ff_done
+
+ff_have_buf:
+    mov     rcx, pInBuf
+    mov     rax, [rcx]
+    lea     rdx, bufPtr
+    lea     r8, bufMax
+    lea     r9, bufCur
+    call    qword ptr [rax+24]             ; IMFMediaBuffer::Lock
+    test    eax, eax
+    jnz     ff_release
+    mov     r11, qword ptr [bufPtr]
+    xor     ecx, ecx
+ff_y:
+    cmp     ecx, 2073600                   ; luma bytes: a gentle gradient
+    jae     ff_uv
+    mov     eax, ecx
+    and     eax, 3Fh
+    add     eax, 80h
+    mov     byte ptr [r11+rcx], al
+    inc     ecx
+    jmp     ff_y
+ff_uv:
+    cmp     ecx, 3110400
+    jae     ff_filled
+    mov     byte ptr [r11+rcx], 80h        ; chroma: neutral grey
+    inc     ecx
+    jmp     ff_uv
+ff_filled:
+    mov     rcx, pInBuf
+    mov     rax, [rcx]
+    call    qword ptr [rax+32]             ; Unlock
+    mov     rcx, pInBuf
+    mov     rax, [rcx]
+    mov     edx, 3110400
+    call    qword ptr [rax+48]             ; SetCurrentLength
+
+    lea     rcx, pInSample
+    call    MFCreateSample
+    test    eax, eax
+    jz      ff_have_sample
+    mov     edx, eax
+    lea     rcx, szEncSmpl
+    call    emit_num
+    jmp     ff_release
+
+ff_have_sample:
+    mov     rcx, pInSample
+    mov     rax, [rcx]
+    mov     rdx, pInBuf
+    call    qword ptr [rax+336]            ; IMFSample::AddBuffer
+    mov     rcx, pInSample
+    mov     rax, [rcx]
+    mov     rdx, r12
+    call    qword ptr [rax+288]            ; SetSampleTime
+    mov     rcx, pInSample
+    mov     rax, [rcx]
+    mov     edx, 333333                    ; ~30 fps in 100 ns units
+    call    qword ptr [rax+304]            ; SetSampleDuration
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    xor     edx, edx
+    mov     r8, pInSample
+    xor     r9d, r9d
+    call    qword ptr [rax+192]            ; ProcessInput(0, sample, 0)
+    test    eax, eax
+    jz      ff_release
+    cmp     eax, 0C00D36B5h                ; MF_E_NOTACCEPTING: it has not asked for input yet
+    je      ff_release
+    inc     dword ptr [feedFails]
+    mov     edx, eax
+    lea     rcx, szEncInput
+    call    emit_num
+
+ff_release:
+    mov     rcx, pInSample
+    call    rel_if
+    mov     qword ptr [pInSample], 0
+    mov     rcx, pInBuf
+    call    rel_if
+    mov     qword ptr [pInBuf], 0
+ff_done:
+    add     rsp, 50h
+    pop     r12
+    ret
+feed_nv12_frame endp
+
+; Take one encoded access unit off the MFT (call only after it reported HaveOutput).
+drain_one_frame proc
+    push    r12
+    sub     rsp, 50h
+    lea     r10, odb
+    mov     qword ptr [r10], 0             ; dwStreamID
+    mov     qword ptr [r10+8], 0           ; pSample = NULL: the MFT provides samples
+    mov     qword ptr [r10+16], 0          ; dwStatus
+    mov     qword ptr [r10+24], 0          ; pEvents
+    mov     dword ptr [outStatus], 0
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    xor     edx, edx                       ; dwFlags
+    mov     r8d, 1                         ; cOutputBufferCount
+    lea     r9, odb
+    lea     r10, outStatus
+    mov     qword ptr [rsp+20h], r10
+    call    qword ptr [rax+200]            ; ProcessOutput
+    cmp     eax, 0C00D6D72h                ; MF_E_TRANSFORM_NEED_MORE_INPUT is normal
+    je      dr_done
+    test    eax, eax
+    jz      dr_have_sample
+    mov     edx, eax
+    lea     rcx, szEncOut
+    call    emit_num
+    jmp     dr_done
+
+dr_have_sample:
+    mov     r12, qword ptr [odb+8]         ; the encoded sample
+    test    r12, r12
+    jz      dr_done
+    mov     qword ptr [pContig], 0
+    mov     rcx, r12
+    mov     rax, [rcx]
+    lea     rdx, pContig
+    call    qword ptr [rax+328]            ; IMFSample::ConvertToContiguousBuffer
+    test    eax, eax
+    jnz     dr_release_sample
+    mov     rcx, pContig
+    mov     rax, [rcx]
+    lea     rdx, bufPtr
+    lea     r8, bufMax
+    lea     r9, bufCur
+    call    qword ptr [rax+24]             ; Lock
+    test    eax, eax
+    jnz     dr_release_contig
+    mov     r11, qword ptr [bufPtr]
+    mov     ecx, dword ptr [bufCur]
+    xor     r9d, r9d
+    xor     r8d, r8d
+dr_sum:
+    cmp     r8d, ecx
+    jae     dr_sum_done
+    movzx   eax, byte ptr [r11+r8]
+    add     r9d, eax
+    inc     r8d
+    jmp     dr_sum
+dr_sum_done:
+    cmp     dword ptr [encFrames], 0
+    jne     dr_not_first
+    mov     firstSize, ecx
+    mov     firstSum, r9d
+dr_not_first:
+    add     encBytes, ecx
+    inc     encFrames
+    mov     rcx, pContig
+    mov     rax, [rcx]
+    call    qword ptr [rax+32]             ; Unlock
+dr_release_contig:
+    mov     rcx, pContig
+    call    rel_if
+    mov     qword ptr [pContig], 0
+dr_release_sample:
+    cmp     dword ptr [providesSamples], 0
+    jne     dr_done                        ; the MFT owns the samples it provides: never release them
+    mov     rcx, r12
+    call    rel_if
+dr_done:
+    add     rsp, 50h
+    pop     r12
+    ret
+drain_one_frame endp
+
+; Async MFT event loop: feed frames when the MFT asks for input, collect the bitstream when it has
+; output. A blocking GetEvent would wedge the loop, so it always uses MF_EVENT_FLAG_NO_WAIT.
+run_encoder_loop proc
+    push    r12
+    push    r13
+    sub     rsp, 88h
+
+    mov     qword ptr [pEventGen], 0
+    mov     qword ptr [pEvent], 0
+    mov     dword ptr [encFrames], 0
+    mov     dword ptr [encBytes], 0
+    mov     dword ptr [firstSize], 0
+    mov     dword ptr [firstSum], 0
+    mov     qword ptr [hnsPts], 0
+    mov     dword ptr [feedFails], 0
+
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    lea     rdx, iidIMFMEGen
+    lea     r8, pEventGen
+    call    qword ptr [rax+0]              ; QI(IMFMediaEventGenerator)
+    test    eax, eax
+    jz      el_have_gen
+    mov     edx, eax
+    lea     rcx, szEncQiGen
+    call    emit_num
+    jmp     el_done
+
+el_have_gen:
+    ; The MFT is asynchronous: it must be fed only after it asks with METransformNeedInput.
+    mov     qword ptr [hnsPts], 0
+
+    xor     r12d, r12d
+el_loop:
+    cmp     r12d, 4000
+    jae     el_done
+    inc     r12d
+
+    mov     rcx, pEventGen
+    mov     rax, [rcx]
+    mov     edx, 1                         ; MF_EVENT_FLAG_NO_WAIT
+    lea     r8, pEvent
+    call    qword ptr [rax+24]             ; GetEvent
+    test    eax, eax
+    jz      el_got_event
+    cmp     eax, 0C00D3E80h                ; MF_E_NO_EVENTS_AVAILABLE
+    jne     el_event_fail
+    mov     ecx, 1
+    call    Sleep
+    jmp     el_loop
+
+el_event_fail:
+    mov     edx, eax
+    lea     rcx, szEncEvent
+    call    emit_num
+    jmp     el_done
+
+el_got_event:
+    mov     dword ptr [evType], 0
+    mov     rcx, pEvent
+    mov     rax, [rcx]
+    lea     rdx, evType
+    call    qword ptr [rax+264]            ; IMFMediaEvent::GetType
+    mov     rcx, pEvent
+    call    rel_if
+    mov     qword ptr [pEvent], 0
+
+    mov     eax, evType
+    cmp     eax, 601                       ; METransformNeedInput
+    je      el_need_input
+    cmp     eax, 602                       ; METransformHaveOutput
+    je      el_have_output
+    lea     rcx, szE2                      ; log only unusual event types
+    mov     edx, evType
+    call    emit_num
+    jmp     el_loop
+
+el_need_input:
+    mov     rcx, qword ptr [hnsPts]
+    call    feed_nv12_frame
+    add     qword ptr [hnsPts], 333333
+    cmp     dword ptr [feedFails], 5       ; the MFT is rejecting everything: stop hammering it
+    jae     el_done
+    jmp     el_loop
+
+el_have_output:
+    call    drain_one_frame
+    cmp     dword ptr [encFrames], 3
+    jb      el_loop
+
+el_done:
+    lea     rcx, szEncFrames
+    mov     edx, encFrames
+    call    emit_num
+    lea     rcx, szEncBytes
+    mov     edx, encBytes
+    call    emit_num
+    lea     rcx, szEncFirst
+    mov     edx, firstSize
+    call    emit_num
+    lea     rcx, szEncFirstSu
+    mov     edx, firstSum
+    call    emit_num
+    cmp     dword ptr [encFrames], 0
+    jbe     el_cleanup
+    lea     rcx, szEncOk
+    call    emit_z
+
+el_cleanup:
+    mov     rcx, pEvent
+    call    rel_if
+    mov     qword ptr [pEvent], 0
+    mov     rcx, pEventGen
+    call    rel_if
+    mov     qword ptr [pEventGen], 0
+    mov     rcx, pInSample
+    call    rel_if
+    mov     qword ptr [pInSample], 0
+    mov     rcx, pInBuf
+    call    rel_if
+    mov     qword ptr [pInBuf], 0
+
+    add     rsp, 88h
+    pop     r13
+    pop     r12
+    ret
+run_encoder_loop endp
 
 ; int mainCRTStartup(void)
 mainCRTStartup proc

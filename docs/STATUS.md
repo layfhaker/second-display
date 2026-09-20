@@ -163,6 +163,13 @@ C# и Rust, третья реализация. Сборка: `host-asm\build.ps1
   `MFTEnumEx(HARDWARE|SORTANDFILTER)` (найдено 2 MFT) → `ActivateObject` → снятие async-лока и
   low latency → HEVC-выход + NV12-вход → `GetOutputStreamInfo` (`provides_samples=0x100`) →
   `ProcessMessage(BEGIN_STREAMING/START_OF_STREAM)`.
+- **M7b-2**: **асинхронный цикл энкодера** — `GetEvent` (`MF_EVENT_FLAG_NO_WAIT`) → `601
+  METransformNeedInput` → подача NV12-сэмпла (`MFCreateMemoryBuffer` + `MFCreateSample`) → `602
+  METransformHaveOutput` → `ProcessOutput` → `ConvertToContiguousBuffer`/`Lock` → готовый Annex-B.
+  Живой прогон: `encoded frames=3`, `total HEVC bytes=3130`, `first frame bytes=2881`,
+  `HEVC encode OK`. Две грабли по пути: `ProcessInput` до первого запроса даёт
+  `MF_E_NOTACCEPTING` (0xC00D36B5 — не ошибка), а сэмпл, который MFT отдаёт при
+  `provides_samples`, освобождать **нельзя** (это снимает ссылку самого MFT → AV).
 
 **Главный урок M6 (стоил почти целой сессии):** смещения vtable нельзя брать по памяти. Я взял
 `IDXGIOutput1::DuplicateOutput` за слот 17 (offset 136), а это **слот 22 (offset 176)**: у
@@ -180,9 +187,9 @@ QI'ил переданный девайс в `IDXGISurface` и возвраща�
 (`dxgi.h`/`dxgi1_2.h`/`d3d11.h`/`mftransform.h`/`mfobjects.h`). Отдельная мелочь, стоившая билда:
 hex-литерал MASM, начинающийся с A–F, обязан иметь ведущий ноль (`0C1h`, а не `C1h`).
 
-Дальше: **M7b-2** — асинхронный цикл событий MFT (`GetEvent` с `MF_EVENT_FLAG_NO_WAIT` →
-`METransformNeedInput=601` / `METransformHaveOutput=602`), подача кадра и вычитывание HEVC-потока;
-затем сессии/оркестратор и CLI.
+Дальше: **сомкнуть тракт** (захват M6 → VPP M7a → энкодер M7b в один цикл), отдать Annex-B поток в
+TCP-сессии, zero-copy вход энкодера (`MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager`), затем
+курсор/ввод/heartbeat и CLI.
 
 ## Rust-переписка хоста (`host-rs/`) — 2026-09-19
 

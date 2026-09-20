@@ -158,9 +158,11 @@ RenderTarget курсору** (быстрый тест). Если не помо�
   `Map` → контрольная сумма.
 - ✅ **M7a**: GPU BGRA→NV12 через `ID3D11VideoProcessor` (`VideoProcessorBlt`), проверка по Y/UV.
 - ✅ **M7b-1**: Media Foundation + аппаратный HEVC-MFT (media types, async-лок, старт стрима).
-- ⏳ **M7b-2**: цикл событий MFT (601/602), подача кадра и вычитывание HEVC-потока.
-- ⏳ Дальше: zero-copy вход энкодера (`MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager`), сессии
-  (курсор, ввод, `PING`), оркестратор и CLI.
+- ✅ **M7b-2**: асинхронный цикл энкодера (601/602), подача NV12 и вычитывание HEVC-потока
+  (`encoded frames=3`, `first frame bytes=2881`, «HEVC encode OK»).
+- ⏳ Дальше: сомкнуть тракт в один цикл (захват → VPP → энкодер), отдать поток в TCP-сессии,
+  zero-copy вход энкодера (`MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager`), курсор, ввод,
+  `PING`, оркестратор и CLI.
 
 Детали, грабли и метод (источники истины для vtable/IID/структур) — в **`host-asm/README.md`**;
 журнал сессии — в `docs/STATUS.md`.
