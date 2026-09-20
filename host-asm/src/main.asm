@@ -386,7 +386,8 @@ accPump   dq ?                 ; encoder feed/drain/send
 accFrames dd ?                 ; encoded frames, i.e. pump calls
 divisor   dd ?                 ; scratch for the per-frame division in the report
 pktOut    db 32 dup(?)         ; VIDEO header + meta staging area
-nv12Frame db 3110400 dup(?)    ; the captured frame, de-pitched (luma then chroma, 1920x1080)
+nv12Frame db 3686400 dup(?)    ; the captured frame, de-pitched (luma then chroma): 1920x1280x3/2,
+                               ; the mode the capture source is selected by, so it must match it
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
 pDup      dq ?                 ; IDXGIOutputDuplication*
@@ -1308,6 +1309,13 @@ cp_out_loop:
     mov     eax, dword ptr [outDesc+76]
     sub     eax, dword ptr [outDesc+68]
     mov     capH, eax
+
+    ; Take the display the tablet is shown, not whatever DXGI lists first: that is the virtual
+    ; display, and its mode is the one we encode. The physical primary would only mirror the desktop.
+    cmp     capW, 1920
+    jne     cp_out_next
+    cmp     capH, 1280
+    jne     cp_out_next
 
     ; ---- IDXGIOutput1 (a prerequisite for DuplicateOutput) ----
     mov     rcx, pOutput
