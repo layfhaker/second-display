@@ -223,7 +223,9 @@ fn start_memory_watchdog() {
                     log::log_sync(&format!(
                         "Host commit hit {mb} MB (limit {COMMIT_LIMIT_MB} MB) - exiting so the task restarts us clean"
                     ));
-                    std::process::exit(0);
+                    // Non-zero on purpose: the scheduled task is configured to restart the host on
+                    // failure. A plain exit(0) looks like success and nothing would bring us back.
+                    std::process::exit(1);
                 }
             }
         });

@@ -42,7 +42,10 @@ function Register-HostTask {
         $action = New-ScheduledTaskAction -Execute $Exe -Argument '--auto' -WorkingDirectory $AppDir
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+        # RestartCount/RestartInterval matter: the host exits on its own when its commit passes a
+        # safety limit (it leaks memory while streaming - being fixed), and nothing else would bring
+        # it back, leaving the tablet black until the next logon.
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
         Log "scheduled task '$TaskName' registered (at logon, highest privileges)."
         Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

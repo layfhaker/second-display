@@ -28,9 +28,26 @@ impl Orchestrator {
         Self { opts, adb, vdd }
     }
 
+    /// True when the desktop already shows a monitor belonging to the virtual display driver, i.e.
+    /// a previous run left it enabled.
+    fn vdd_active(&self) -> bool {
+        let active = self.vdd.active_monitors();
+        display_config::get_monitors()
+            .iter()
+            .any(|m| active.iter().any(|n| n == &m.device))
+    }
+
     pub fn run(&self, ct: &AtomicBool) {
-        let _ = self.vdd.disable();
-        display_config::restore_extend();
+        // Only touch the display topology when the virtual display is left over from an earlier run.
+        // Every disable/restore/enable cycle makes Windows reposition all windows, and doing that on
+        // each host start (which the memory watchdog triggers while its leak is being fixed)
+        // shuffles the user's desktop around for no reason.
+        if self.vdd_active() {
+            logline!("[orchestrator] Virtual display already up — reusing it as is");
+        } else {
+            let _ = self.vdd.disable();
+            display_config::restore_extend();
+        }
 
         self.adb.start_server();
         self.adb.restart_server("startup");
@@ -115,14 +132,30 @@ impl Orchestrator {
         logline!("[orchestrator] Connecting — device {serial} has our app.");
 
         let before = display_config::get_monitors();
+        let existing = {
+            let active = self.vdd.active_monitors();
+            before
+                .iter()
+                .find(|m| active.iter().any(|n| n == &m.device))
+                .cloned()
+        };
         let saved = SavedLayout::save();
-        self.vdd.enable();
 
-        let monitor = match self.vdd.wait_for_monitor(&before, 8000) {
-            Some(m) => m,
+        let monitor = match existing {
+            Some(m) => {
+                // Already up: reusing it avoids two display changes per host start.
+                logline!("[orchestrator] Reusing the virtual display {m:?}");
+                m
+            }
             None => {
-                logline!("[orchestrator] WaitForMonitor timed out — no VDD monitor appeared.");
-                return;
+                self.vdd.enable();
+                match self.vdd.wait_for_monitor(&before, 8000) {
+                    Some(m) => m,
+                    None => {
+                        logline!("[orchestrator] WaitForMonitor timed out — no VDD monitor appeared.");
+                        return;
+                    }
+                }
             }
         };
 

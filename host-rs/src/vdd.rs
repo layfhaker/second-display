@@ -102,7 +102,8 @@ impl VddController {
         }
     }
 
-    fn remove_vdd_monitors(&self) {
+    /// Names of the VDD's display devices (`\\.\DISPLAYn`) that the desktop currently sees.
+    pub fn active_monitors(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         unsafe {
             let mut i = 0u32;
@@ -124,6 +125,11 @@ impl VddController {
                 i += 1;
             }
         }
+        names
+    }
+
+    fn remove_vdd_monitors(&self) {
+        let names = self.active_monitors();
         for n in &names {
             logline!("[vdd] Removing phantom monitor: {n}");
             let w: Vec<u16> = n.encode_utf16().chain(std::iter::once(0)).collect();
