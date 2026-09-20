@@ -1620,7 +1620,7 @@ cap_staging_probe:
     mov     dword ptr [r10+24], 0       ; SampleDesc.Quality
     mov     dword ptr [r10+28], 3       ; D3D11_USAGE_STAGING
     mov     dword ptr [r10+32], 0       ; BindFlags
-    mov     dword ptr [r10+36], 30000h  ; D3D11_CPU_ACCESS_READ|WRITE - the pointer is drawn in here
+    mov     dword ptr [r10+36], 20000h  ; D3D11_CPU_ACCESS_READ
     mov     dword ptr [r10+40], 0       ; MiscFlags
 
     mov     rcx, pDevice
@@ -1932,7 +1932,7 @@ cap_stg_created:
     mov     rax, [rcx]
     mov     rdx, pStaging
     xor     r8d, r8d
-    mov     r9d, 3                         ; D3D11_MAP_READ_WRITE (the pointer is painted below)
+    mov     r9d, 1                         ; D3D11_MAP_READ: READ_WRITE made this map read zeros
     mov     dword ptr [rsp+20h], 0
     lea     r10, mapped
     mov     qword ptr [rsp+28h], r10
