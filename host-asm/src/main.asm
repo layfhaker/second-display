@@ -979,9 +979,11 @@ draw_cursor proc
     ; this: the pointer lives on the virtual display, so its position is simply GetCursorPos minus the
     ; display origin, clipped to the frame. r10d = row pitch, r11 = plane base, used by the caller.
     push    rbx
+    push    rsi
+    push    rdi
     push    r12
     push    r13
-    sub     rsp, 40h
+    sub     rsp, 30h
     lea     rcx, curPt
     call    GetCursorPos
     test    eax, eax
@@ -1031,9 +1033,11 @@ dc_next_row:
     inc     esi
     jmp     dc_row
 dc_done:
-    add     rsp, 40h
+    add     rsp, 30h
     pop     r13
     pop     r12
+    pop     rdi
+    pop     rsi
     pop     rbx
     ret
 draw_cursor endp
