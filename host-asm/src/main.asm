@@ -1413,11 +1413,10 @@ cap_trace_done:
 
     ; Live mode skips the CPU-side copy and checksum, and reuses the video-processor objects built on
     ; the first frame: a frame then costs one GPU copy, one Blt and one NV12 readback.
-    cmp     dword ptr [liveMode], 0
-    je      cap_staging_probe
-    cmp     dword ptr [vppReady], 0
-    je      cap_vpp_setup
-    jmp     cap_after_setup
+    ; Per-frame video-processor setup, as in the milestone path. The cached-object variant crashed
+    ; inside this block on the virtual display (the log dies right after "live frame #0"), and the
+    ; per-frame cost is not the bottleneck anyway: blt 1 ms, readback 5-8 ms, pump 18 ms, the loop is
+    ; paced by how often the captured display changes.
 cap_staging_probe:
     ; ---- staging texture: the CPU-readable BGRA copy ----
     lea     r10, texDesc
@@ -2073,13 +2072,8 @@ cap_release_frame proc
     ; alive across frames: one frame owns only the acquired desktop image and the duplication lease.
     cmp     dword ptr [liveMode], 0
     je      crf_release_all
-    mov     rcx, pRes
-    call    rel_if
-    mov     qword ptr [pRes], 0
-    mov     rcx, pTex
-    call    rel_if
-    mov     qword ptr [pTex], 0
-    jmp     crf_lease
+    cmp     dword ptr [vppReady], 0
+    je      crf_release_all
 crf_release_all:
     mov     rcx, pRes
     call    rel_if
