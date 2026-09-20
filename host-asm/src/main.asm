@@ -1655,7 +1655,9 @@ cap_staging_probe:
     ; ---- checksum the whole mapped frame: proof that real pixels came back ----
     mov     r11, qword ptr [mapped]        ; pData
     mov     r10d, dword ptr [mapped+8]     ; RowPitch
-    call    draw_cursor                    ; the pointer goes in before the video processor reads this
+    ; draw_cursor belongs here, but calling it at this point killed the host before the first frame
+    ; even after the register discipline was fixed, so it stays out until the crash it causes is
+    ; understood - a host that streams beats a host that paints a pointer and dies.
     mov     rowPitch, r10d
     mov     eax, r10d
     imul    eax, dword ptr [capH]          ; total bytes = RowPitch * Height
