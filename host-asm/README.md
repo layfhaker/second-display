@@ -39,7 +39,8 @@ d3d11.lib mfplat.lib`. Путь к `vcvars64.bat` зашит в `build.ps1` (VS 
 | M7a | **GPU BGRA→NV12** через `ID3D11VideoProcessor`: enumerator → processor → NV12 RT-текстура + output view → input view на кадре → `VideoProcessorBlt` → чтение назад по Y/UV | `50b152d` |
 | M7b-1 | **Media Foundation + аппаратный HEVC-энкодер**: `MFStartup` → `MFTEnumEx` → `ActivateObject` → async unlock + low latency → HEVC-выход + NV12-вход → `GetOutputStreamInfo` → `ProcessMessage(BEGIN_STREAMING/START_OF_STREAM)` | `989d594` |
 | M7b-2 | **Асинхронный цикл энкодера**: `GetEvent` (`MF_EVENT_FLAG_NO_WAIT`) → `601 METransformNeedInput` → подача NV12-сэмпла → `602 METransformHaveOutput` → `ProcessOutput` → `ConvertToContiguousBuffer`/`Lock` → готовый Annex-B поток | `6a78053` |
-| M7c | **Тракт сомкнут**: кадр из захвата (M6) → GPU BGRA→NV12 (M7a) → копия реального NV12-кадра в буфер → энкодер (M7b) кодирует **этот самый кадр**. Доказано суммой яркости: `VPP: Y checksum` = `enc: input luma sum` = 33177600 | этот коммит |
+| M7c | **Тракт сомкнут**: кадр из захвата (M6) → GPU BGRA→NV12 (M7a) → копия реального NV12-кадра в буфер → энкодер (M7b) кодирует **этот самый кадр**. Доказано суммой яркости: `VPP: Y checksum` = `enc: input luma sum` = 33177600 | `f219746` |
+| M8a | **Готовое видео уходит в TCP**: закодированный кадр упаковывается в VIDEO-пакет (`[0x10][u32 len]` + `i64 pts_mks` + `u8 keyframe` + Annex-B) и уходит клиенту, который остался подключён после `HELLO`/`READY`. `keyframe` считается по NAL-типам (19/20/32/33/34), как в Rust-эталоне | этот коммит |
 
 Живые подтверждения из лога:
 
@@ -58,10 +59,18 @@ MF: encoded frames=3 ; total HEVC bytes=1090 ; first frame bytes=823
 MF: first frame checksum=93186 ; MF: HEVC encode OK
 ```
 
+Клиент при этом видит (M8a):
+
+```
+READY: 1920x1280 refresh=60 codec=2
+VIDEO #1: payload=177089 pts_us=33333 keyframe=1 startcode=True
+          первые байты: 00 00 00 01 40 01 0C 01     <- start-code, NAL 32 (VPS), SEI
+```
+
 ## Следующее
 
-1. Отправить готовый Annex-B поток в TCP-сессии (сейчас M4 умеет только `HELLO`/`READY`) — превратить
-   пробу в живой кадровый цикл: `AcquireNextFrame` → VPP → энкодер → `send`.
+1. Превратить пробу в живой кадровый цикл: `AcquireNextFrame` → VPP → энкодер → `send` — непрерывно,
+   с темпом под refresh клиента (сейчас отправка уже работает, но кадров ровно три: проба конечна).
 2. Zero-copy вход для энкодера: `MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager` (сейчас кадр едет
    через память: `Map` → копия строк в свой буфер → `Lock` входного буфера MFT).
 3. Курсор (`CURSOR`), ввод (`TOUCH`/`KEY` через `SendInput` с нормировкой по виртуальному десктопу),

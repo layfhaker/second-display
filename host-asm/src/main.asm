@@ -37,6 +37,7 @@ SO_REUSEADDR           equ 4
 ; ---- wire protocol ----
 PKT_HELLO              equ 01h
 PKT_READY              equ 02h
+PKT_VIDEO              equ 10h
 CODEC_H265             equ 2
 
 PORT                   equ 27315   ; the shipped host listens here
@@ -120,6 +121,12 @@ szHelloH  db "hello height=", 0
 szHelloD  db "hello density=", 0
 szHelloR  db "hello refresh=", 0
 szReady   db "READY sent (1920x1280 refresh=60 codec=2)", 13, 10, 0
+szStreamKeep db "client kept for streaming", 13, 10, 0
+szSentBytes db "  sent VIDEO payload=", 0
+szSentKey db "  sent keyframe=", 0
+szSendFail db "  send failed wsa=", 0
+szStreamTot db "STREAM: frames sent=", 0
+szStreamTotB db "STREAM: bytes sent=", 0
 szRecvFail db "recv failed wsa=", 0
 szAccept  db "accept() failed wsa=", 0
 
@@ -337,6 +344,12 @@ firstSum  dd ?
 hnsPts    dq ?                 ; next sample time
 feedFails dd ?                 ; consecutive ProcessInput failures
 haveFrame dd ?                 ; 1 once the capture stage stashed a real NV12 frame
+streamSock dd ?                ; the client kept alive for streaming (0 = nobody connected)
+sendPtr   dq ?                 ; Annex-B payload currently being sent
+sendLen   dd ?
+sentFrames dd ?
+sentBytes dd ?
+pktOut    db 32 dup(?)         ; VIDEO header + meta staging area
 nv12Frame db 3110400 dup(?)    ; the captured frame, de-pitched (luma then chroma, 1920x1080)
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
@@ -788,6 +801,13 @@ send_ready:
     lea     rcx, szReady
     call    emit_z
 
+    ; ---- keep this client alive: the capture/encoder stages stream frames into it ----
+    mov     eax, sockClient
+    mov     streamSock, eax
+    lea     rcx, szStreamKeep
+    call    emit_z
+    jmp     tcp_done                       ; do not close it, do not WSACleanup under it
+
 close_client:
     mov     ecx, sockClient
     call    closesocket
@@ -803,6 +823,133 @@ tcp_done:
     add     rsp, 48h
     ret
 run_tcp_selftest endp
+
+; ---------------------------------------------------------------------------
+; send_video_frame — wrap the encoded Annex-B payload in a VIDEO packet and push it to the client.
+; Wire format, mirroring the C#/Rust hosts:
+;   [0x10][u32 payloadLen] + [i64 pts_micros][u8 keyframe] + Annex-B bytes
+; Reads sendPtr/sendLen; a single packet is in flight at any moment, so staging in pktOut is safe.
+; ---------------------------------------------------------------------------
+send_video_frame proc
+    push    rbx
+    sub     rsp, 40h
+
+    mov     eax, streamSock
+    test    eax, eax
+    jz      svf_done                       ; nobody connected — nothing to send
+
+    mov     byte ptr [pktOut], PKT_VIDEO
+    mov     eax, sendLen
+    add     eax, 9                         ; 8-byte pts + key flag, then the payload
+    mov     dword ptr [pktOut+1], eax
+
+    mov     rax, hnsPts                    ; the probe clock runs in 100 ns; the wire wants microseconds
+    xor     edx, edx
+    mov     ecx, 10
+    div     rcx
+    mov     qword ptr [pktOut+5], rax
+
+    call    payload_is_keyframe
+    mov     byte ptr [pktOut+13], al
+
+    mov     ecx, streamSock
+    lea     rdx, pktOut
+    mov     r8d, 14
+    xor     r9d, r9d
+    call    send
+    cmp     eax, 14
+    jne     svf_fail
+
+    mov     ecx, streamSock
+    mov     rdx, qword ptr [sendPtr]
+    mov     r8d, sendLen
+    xor     r9d, r9d
+    call    send
+    cmp     eax, sendLen
+    jne     svf_fail
+
+    inc     sentFrames
+    mov     eax, sendLen
+    add     sentBytes, eax
+    lea     rcx, szSentBytes
+    mov     edx, sendLen
+    call    emit_num
+    lea     rcx, szSentKey
+    movzx   edx, byte ptr [pktOut+13]
+    call    emit_num
+    jmp     svf_done
+
+svf_fail:
+    call    WSAGetLastError
+    mov     edx, eax
+    lea     rcx, szSendFail
+    call    emit_num
+    mov     streamSock, 0                  ; the client is gone; stop trying instead of spamming
+
+svf_done:
+    add     rsp, 40h
+    pop     rbx
+    ret
+send_video_frame endp
+
+; ---------------------------------------------------------------------------
+; payload_is_keyframe — 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
+; Same rule as the Rust reference: locate 00 00 01 / 00 00 00 01, then read (byte >> 1) & 0x3F and
+; accept 19/20 (IRAP) or 32/33/34 (VPS/SPS/PPS).
+; ---------------------------------------------------------------------------
+payload_is_keyframe proc
+    push    rsi
+    mov     rsi, qword ptr [sendPtr]
+    mov     ecx, sendLen
+    cmp     ecx, 6
+    jb      pik_no
+    xor     r8d, r8d
+pik_scan:
+    mov     eax, ecx
+    sub     eax, 6
+    cmp     r8d, eax
+    jae     pik_no
+    cmp     byte ptr [rsi+r8], 0
+    jne     pik_next
+    cmp     byte ptr [rsi+r8+1], 0
+    jne     pik_next
+    movzx   eax, byte ptr [rsi+r8+2]
+    test    eax, eax
+    jnz     pik_three
+    cmp     byte ptr [rsi+r8+3], 1         ; 00 00 00 01
+    jne     pik_next
+    add     r8d, 4
+    jmp     pik_check
+pik_three:
+    cmp     eax, 1                         ; 00 00 01
+    jne     pik_next
+    add     r8d, 3
+pik_check:
+    movzx   eax, byte ptr [rsi+r8]
+    shr     eax, 1
+    and     eax, 3Fh
+    cmp     eax, 19
+    je      pik_yes
+    cmp     eax, 20
+    je      pik_yes
+    cmp     eax, 32
+    je      pik_yes
+    cmp     eax, 33
+    je      pik_yes
+    cmp     eax, 34
+    je      pik_yes
+pik_next:
+    inc     r8d
+    jmp     pik_scan
+pik_yes:
+    mov     eax, 1
+    pop     rsi
+    ret
+pik_no:
+    xor     eax, eax
+    pop     rsi
+    ret
+payload_is_keyframe endp
 
 ; DXGI probe: initialise COM, create a DXGI factory, walk every adapter and its outputs,
 ; logging what the desktop actually exposes. Proves hand-written vtable dispatch works.
@@ -2267,6 +2414,9 @@ dr_sum_done:
 dr_not_first:
     add     encBytes, ecx
     inc     encFrames
+    mov     sendPtr, r11
+    mov     sendLen, ecx
+    call    send_video_frame
     mov     rcx, pContig
     mov     rax, [rcx]
     call    qword ptr [rax+32]             ; Unlock
@@ -2392,6 +2542,13 @@ el_done:
     jbe     el_cleanup
     lea     rcx, szEncOk
     call    emit_z
+
+    lea     rcx, szStreamTot
+    mov     edx, sentFrames
+    call    emit_num
+    lea     rcx, szStreamTotB
+    mov     edx, sentBytes
+    call    emit_num
 
 el_cleanup:
     mov     rcx, pEvent
