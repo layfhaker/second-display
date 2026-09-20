@@ -359,6 +359,7 @@ firstSum  dd ?
 hnsPts    dq ?                 ; next sample time
 feedFails dd ?                 ; consecutive ProcessInput failures
 acqTimeouts dd ?               ; consecutive acquisition timeouts before we got any frame at all
+resendTick dd ?                ; every other timeout re-feeds the last frame, i.e. about 30 fps
 haveFrame dd ?                 ; 1 once the capture stage stashed a real NV12 frame
 streamSock dd ?                ; the client kept alive for streaming (0 = nobody connected)
 ; ---- live loop (one long-lived capture+encode cycle instead of the finite probes) ----
@@ -1423,6 +1424,11 @@ cap_frame_begin:
     jmp     cap_acq_wait
 cap_acq_resend:
     ; A still desktop must not silence the stream: re-feed the frame we already hold in nv12Frame.
+    ; Do it at the declared frame rate and not on every timeout - each feed allocates a fresh NV12
+    ; buffer, and re-feeding as fast as the loop spins is what kept the memory climbing.
+    inc     dword ptr [resendTick]
+    test    dword ptr [resendTick], 1
+    jnz     cap_acq_wait
     call    run_encoder_loop
 cap_acq_wait:
     mov     ecx, 5
