@@ -2359,7 +2359,7 @@ mf_got_attrs:
     mov     r8d, 1
     call    qword ptr [rax+168]            ; MF_LOW_LATENCY
 
-    ; ---- output type: HEVC 1920x1080 @30, 12 Mbps ----
+    ; ---- output type: HEVC 1920x1280 @30, 30 Mbps ----
     lea     rcx, pOutType
     call    MFCreateMediaType
     test    eax, eax
@@ -2395,7 +2395,8 @@ mf_out_created:
     mov     rcx, pOutType
     mov     rax, [rcx]
     lea     rdx, mfMtFrameSize
-    mov     r8, 78000000438h               ; 1920 << 32 | 1080
+    mov     r8, 78000000500h               ; 1920 << 32 | 1280 - must match what READY announces
+                                           ; and what nv12Frame holds, or the decoder shows garbage
     call    qword ptr [rax+176]            ; SetUINT64(FRAME_SIZE)
     mov     rcx, pOutType
     mov     rax, [rcx]
@@ -2451,7 +2452,8 @@ mf_in_created:
     mov     rcx, pInType
     mov     rax, [rcx]
     lea     rdx, mfMtFrameSize
-    mov     r8, 78000000438h
+    mov     r8, 78000000500h               ; 1920 << 32 | 1280 - the input type has to describe the
+                                           ; frame we actually feed, not the old 1080 one
     call    qword ptr [rax+176]
     mov     rcx, pInType
     mov     rax, [rcx]
@@ -2556,7 +2558,7 @@ feed_nv12_frame proc
     mov     qword ptr [pInBuf], 0
     mov     qword ptr [pInSample], 0
 
-    mov     ecx, 3110400                   ; 1920x1080 NV12 = luma + half-size chroma
+    mov     ecx, 3686400                   ; 1920x1280 NV12 = luma + half-size chroma
     lea     rdx, pInBuf
     call    MFCreateMemoryBuffer
     test    eax, eax
