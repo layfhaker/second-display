@@ -2139,24 +2139,36 @@ cap_cleanup:
     mov     rax, [rcx]
     call    qword ptr [rax+112]    ; ReleaseFrame (no-op if nothing was acquired)
 cap_no_dup:
+    ; Every pointer here must be zeroed as it is released. Without the zeros the session teardown that
+    ; follows (release_previous_capture) released them a second time and called through a freed vtable -
+    ; the BEX64 "faulting module: unknown, offset 0xe" crashes that ended every session.
     mov     rcx, pDup
     call    rel_if
+    mov     qword ptr [pDup], 0
     mov     rcx, pContext
     call    rel_if
+    mov     qword ptr [pContext], 0
     mov     rcx, pDxgiDevice
     call    rel_if
+    mov     qword ptr [pDxgiDevice], 0
     mov     rcx, pDevAdapter
     call    rel_if
+    mov     qword ptr [pDevAdapter], 0
     mov     rcx, pDevice
     call    rel_if
+    mov     qword ptr [pDevice], 0
     mov     rcx, pOutput1
     call    rel_if
+    mov     qword ptr [pOutput1], 0
     mov     rcx, pOutput
     call    rel_if
+    mov     qword ptr [pOutput], 0
     mov     rcx, pAdapter
     call    rel_if
+    mov     qword ptr [pAdapter], 0
     mov     rcx, pFactory
     call    rel_if
+    mov     qword ptr [pFactory], 0
 
     add     rsp, 88h
     pop     r13
