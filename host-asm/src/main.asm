@@ -1392,6 +1392,14 @@ cap_frame_begin:
     ; sent while the virtual display sat still. Wait and try again.
     cmp     eax, 887A0027h
     jne     cap_acq_fail
+    ; A still desktop must not silence the stream: re-feed the last frame we already hold in nv12Frame
+    ; so the client keeps receiving a picture instead of nothing at all, then wait and try again.
+    cmp     dword ptr [liveCount], 0
+    jbe     cap_acq_wait
+    cmp     dword ptr [haveFrame], 0
+    je      cap_acq_wait
+    call    run_encoder_loop
+cap_acq_wait:
     mov     ecx, 5
     call    Sleep
     jmp     cap_frame_begin
