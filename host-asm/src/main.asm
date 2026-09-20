@@ -2315,10 +2315,54 @@ emit_stage_report endp
 ;   IMFAttributes: SetUINT32 = 168, SetUINT64 = 176, SetGUID = 192
 ;   IMFActivate: ActivateObject = 264
 ;   IMFMediaEventGenerator: GetEvent = 24 ; IMFMediaEvent: GetType = 264
+; Release everything a previous session left behind, including the Media Foundation platform itself.
+; The hardware encoder MFT keeps memory per encoded frame until the platform is torn down - the same
+; phenomenon that made the Rust host leak - and this host creates a new encoder for every session
+; without ever letting the old one go. Left alone, that is megabytes per frame of growth.
+release_previous_encoder proc
+    sub     rsp, 28h
+    mov     rcx, pInSample
+    call    rel_if
+    mov     qword ptr [pInSample], 0
+    mov     rcx, pInBuf
+    call    rel_if
+    mov     qword ptr [pInBuf], 0
+    mov     rcx, pContig
+    call    rel_if
+    mov     qword ptr [pContig], 0
+    mov     rcx, pEvent
+    call    rel_if
+    mov     qword ptr [pEvent], 0
+    mov     rcx, pEventGen
+    call    rel_if
+    mov     qword ptr [pEventGen], 0
+    mov     rcx, pOutType
+    call    rel_if
+    mov     qword ptr [pOutType], 0
+    mov     rcx, pInType
+    call    rel_if
+    mov     qword ptr [pInType], 0
+    mov     rcx, pAttrs
+    call    rel_if
+    mov     qword ptr [pAttrs], 0
+    mov     rcx, pTransform
+    call    rel_if
+    mov     qword ptr [pTransform], 0
+    mov     rcx, pActivate
+    call    rel_if
+    mov     qword ptr [pActivate], 0
+    ; The CoTaskMem list is freed by the probe itself; only the transform and the platform matter here.
+    call    MFShutdown             ; gives the driver back what its MFT retained for this session
+    add     rsp, 28h
+    ret
+release_previous_encoder endp
+
 run_encoder_probe proc
     push    r12
     push    r13
     sub     rsp, 88h
+
+    call    release_previous_encoder
 
     mov     qword ptr [pActivates], 0
     mov     qword ptr [pActivate], 0
