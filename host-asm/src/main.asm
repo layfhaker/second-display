@@ -685,6 +685,21 @@ run_tcp_selftest proc
     jmp     tcp_done
 
 ws_ok:
+    ; Each serve cycle used to leave its listening and client sockets behind, so the next bind failed
+    ; with WSAEACCES (10013) and the host churned: one session, then nothing. Close them first.
+    mov     ecx, sockListen
+    cmp     ecx, 0
+    jle     ws_no_old_listen
+    call    closesocket
+    mov     dword ptr [sockListen], 0
+ws_no_old_listen:
+    mov     ecx, streamSock
+    cmp     ecx, 0
+    jle     ws_no_old_client
+    call    closesocket
+    mov     dword ptr [streamSock], 0
+ws_no_old_client:
+
     ; ---- socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) ----
     mov     ecx, AF_INET
     mov     edx, SOCK_STREAM
@@ -2900,6 +2915,9 @@ el_got_event:
     jmp     el_loop
 
 el_need_input:
+    lea     rcx, szE2                      ; trace: are we actually being asked for input?
+    mov     edx, 601
+    call    emit_num
     mov     rcx, qword ptr [hnsPts]
     call    feed_nv12_frame
     mov     eax, ptsStep
@@ -2909,6 +2927,9 @@ el_need_input:
     jmp     el_loop
 
 el_have_output:
+    lea     rcx, szE2                      ; trace: does the MFT ever hand us an encoded frame?
+    mov     edx, 602
+    call    emit_num
     call    drain_one_frame
     inc     dword ptr [pumpDrained]
     cmp     dword ptr [liveMode], 0
