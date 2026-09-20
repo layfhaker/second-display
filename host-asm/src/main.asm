@@ -94,6 +94,7 @@ EXTERN MFCreateMemoryBuffer:PROC
 EXTERN GetCursorPos:PROC
 EXTERN SendInput:PROC
 EXTERN ioctlsocket:PROC
+EXTERN MFCreateDXGIDeviceManager:PROC
 EXTERN MFCreateDXGISurfaceBuffer:PROC
 EXTERN CoTaskMemFree:PROC
 
@@ -1037,7 +1038,7 @@ dc_done:
     ret
 draw_cursor endp
 
- — 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
+; payload_is_keyframe - 1 when the Annex-B payload carries an IRAP or a parameter-set NAL.
 ; Same rule as the Rust reference: locate 00 00 01 / 00 00 00 01, then read (byte >> 1) & 0x3F and
 ; accept 19/20 (IRAP) or 32/33/34 (VPS/SPS/PPS).
 ; ---------------------------------------------------------------------------
