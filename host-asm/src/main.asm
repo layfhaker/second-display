@@ -358,6 +358,7 @@ firstSize dd ?
 firstSum  dd ?
 hnsPts    dq ?                 ; next sample time
 feedFails dd ?                 ; consecutive ProcessInput failures
+acqTimeouts dd ?               ; consecutive acquisition timeouts before we got any frame at all
 haveFrame dd ?                 ; 1 once the capture stage stashed a real NV12 frame
 streamSock dd ?                ; the client kept alive for streaming (0 = nobody connected)
 ; ---- live loop (one long-lived capture+encode cycle instead of the finite probes) ----
@@ -1407,12 +1408,18 @@ cap_frame_begin:
     ; sent while the virtual display sat still. Wait and try again.
     cmp     eax, 887A0027h
     jne     cap_acq_fail
-    ; A still desktop must not silence the stream: re-feed the last frame we already hold in nv12Frame
-    ; so the client keeps receiving a picture instead of nothing at all, then wait and try again.
-    cmp     dword ptr [liveCount], 0
-    jbe     cap_acq_wait
     cmp     dword ptr [haveFrame], 0
-    je      cap_acq_wait
+    jne     cap_acq_resend
+    ; No frame at all yet and the acquisition keeps timing out: that is a stale duplication. DXGI
+    ; invalidates duplications on mode changes and the display then delivers nothing for this session
+    ; (Rust on the very same display sees ~30 fps, so the frames are there). Waiting longer never helps
+    ; - end the session so the serve loop rebuilds the capture stage and gets a fresh duplication.
+    inc     dword ptr [acqTimeouts]
+    cmp     dword ptr [acqTimeouts], 3
+    jae     cap_frame_done
+    jmp     cap_acq_wait
+cap_acq_resend:
+    ; A still desktop must not silence the stream: re-feed the frame we already hold in nv12Frame.
     call    run_encoder_loop
 cap_acq_wait:
     mov     ecx, 5
@@ -1420,6 +1427,7 @@ cap_acq_wait:
     jmp     cap_frame_begin
 cap_acq_ok:
 
+    mov     dword ptr [acqTimeouts], 0
     ; ---- the acquired IDXGIResource is an ID3D11Texture2D ----
     mov     rcx, pRes
     mov     rax, [rcx]
