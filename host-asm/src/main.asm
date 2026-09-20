@@ -353,6 +353,7 @@ liveCount  dd ?                ; frames the live loop has streamed so far
 pumpCap    dd ?                ; event-poll iterations one pump call may spend before giving up
 pumpDrained dd ?               ; frames this pump call has drained (live mode stops after one)
 ptsStep    dd ?                ; how much the sample time advances per fed frame (100 ns units)
+feedToggle dd ?                ; flips per captured frame so only every other one is encoded
 sendPtr   dq ?                 ; Annex-B payload currently being sent
 sendLen   dd ?
 sentFrames dd ?
@@ -1756,13 +1757,20 @@ cap_frame_logged:
 
 cap_frame_live:
     ; ---- live mode: hand this frame to the encoder and take the next one ----
-    call    run_encoder_loop               ; pump: feeds on need-input, drains and sends on have-output
+    ; The virtual display presents at 60 Hz, but the hardware MFT sizes its output sample for the
+    ; configured bitrate at 30 fps (12e6/8/30 = 50000 bytes) and clips anything larger. Encoding every
+    ; other captured frame keeps the feed inside that budget and keeps the sample times honest.
+    xor     dword ptr [feedToggle], 1
     inc     dword ptr [liveCount]
     mov     eax, liveCount
     cmp     eax, liveFrames
     jae     cap_frame_done
+    cmp     dword ptr [feedToggle], 0
+    je      cap_frame_release
+    call    run_encoder_loop               ; pump: feeds on need-input, drains and sends on have-output
     cmp     dword ptr [streamSock], 0      ; the client went away
     je      cap_frame_done
+cap_frame_release:
     call    cap_release_frame
     jmp     cap_frame_begin
 
