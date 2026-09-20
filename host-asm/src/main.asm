@@ -183,6 +183,8 @@ szVpBlt    db "VPP: VideoProcessorBlt hr=", 0
 szVpStg    db "VPP: NV12 staging CreateTexture2D hr=", 0
 szVpMap    db "VPP: NV12 Map hr=", 0
 szVpOk     db "VPP: BGRA->NV12 blt ok", 13, 10, 0
+szVpCopyDone db "VPP: NV12 frame captured", 13, 10, 0
+szInSum    db "  enc: input luma sum=", 0
 szYSum     db "VPP: Y checksum=", 0
 szUvSum    db "VPP: UV checksum=", 0
 
@@ -334,6 +336,8 @@ firstSize dd ?
 firstSum  dd ?
 hnsPts    dq ?                 ; next sample time
 feedFails dd ?                 ; consecutive ProcessInput failures
+haveFrame dd ?                 ; 1 once the capture stage stashed a real NV12 frame
+nv12Frame db 3110400 dup(?)    ; the captured frame, de-pitched (luma then chroma, 1920x1080)
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
 pOutput1  dq ?                 ; IDXGIOutput1*
 pDup      dq ?                 ; IDXGIOutputDuplication*
@@ -1522,6 +1526,59 @@ vp_uvsum:
 vp_uvsum_done:
     mov     uvSum, edx
 
+    ; ---- stash the real NV12 frame for the encoder stage ----
+    ; The staging texture's row pitch may exceed the frame width, so rows are copied one by one
+    ; (qword at a time, byte tail) instead of one big block.
+    push    rsi
+    push    rdi
+
+    xor     r8d, r8d                       ; row index
+    mov     r11, qword ptr [mapped]        ; source base
+    mov     r10d, dword ptr [mapped+8]     ; source pitch
+    mov     r9d, dword ptr [capW]          ; bytes per luma row
+    mov     edx, dword ptr [capH]
+    mov     eax, edx
+    shr     eax, 1
+    add     edx, eax                       ; total rows = height * 3 / 2
+vp_copy:
+    cmp     r8d, edx
+    jae     vp_copy_done
+    mov     eax, r8d
+    imul    eax, r10d                      ; row * rowPitch
+    lea     rsi, [r11+rax]
+    mov     eax, r8d
+    imul    eax, r9d                       ; row * width
+    lea     rdi, nv12Frame
+    add     rdi, rax
+    mov     ecx, r9d                       ; bytes in this row
+    shr     ecx, 3                         ; qwords
+vp_copy_q:
+    mov     rax, qword ptr [rsi]
+    mov     qword ptr [rdi], rax
+    add     rsi, 8
+    add     rdi, 8
+    dec     ecx
+    jnz     vp_copy_q
+    mov     ecx, r9d
+    and     ecx, 7                         ; tail bytes, if the row is not a multiple of 8
+vp_copy_b:
+    jz      vp_copy_bdone
+    movzx   eax, byte ptr [rsi]
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    dec     ecx
+    jmp     vp_copy_b
+vp_copy_bdone:
+    inc     r8d
+    jmp     vp_copy
+vp_copy_done:
+    pop     rdi
+    pop     rsi
+    lea     rcx, szVpCopyDone
+    call    emit_z
+    mov     dword ptr [haveFrame], 1
+
     mov     rcx, pContext
     mov     rax, [rcx]
     mov     rdx, pNv12Stg
@@ -2034,6 +2091,26 @@ ff_have_buf:
     test    eax, eax
     jnz     ff_release
     mov     r11, qword ptr [bufPtr]
+    cmp     dword ptr [haveFrame], 0
+    je      ff_synthetic
+    push    rsi
+    push    rdi
+    lea     rsi, nv12Frame                 ; feed what the capture stage produced
+    mov     rdi, r11
+    mov     ecx, 3110400
+    mov     edx, ecx
+    shr     ecx, 3
+ff_copy_q:
+    mov     rax, qword ptr [rsi]
+    mov     qword ptr [rdi], rax
+    add     rsi, 8
+    add     rdi, 8
+    dec     ecx
+    jnz     ff_copy_q
+    pop     rdi
+    pop     rsi
+    jmp     ff_filled
+ff_synthetic:
     xor     ecx, ecx
 ff_y:
     cmp     ecx, 2073600                   ; luma bytes: a gentle gradient
@@ -2051,6 +2128,20 @@ ff_uv:
     inc     ecx
     jmp     ff_uv
 ff_filled:
+    ; sanity check: prove which frame the encoder actually received. With the real capture this
+    ; must equal the VPP luma checksum printed above; the synthetic fallback gives a different sum.
+    xor     ecx, ecx
+    xor     edx, edx
+ff_sum:
+    cmp     ecx, 2073600
+    jae     ff_sum_done
+    movzx   eax, byte ptr [r11+rcx]
+    add     edx, eax
+    inc     ecx
+    jmp     ff_sum
+ff_sum_done:
+    lea     rcx, szInSum
+    call    emit_num
     mov     rcx, pInBuf
     mov     rax, [rcx]
     call    qword ptr [rax+32]             ; Unlock

@@ -38,7 +38,8 @@ d3d11.lib mfplat.lib`. Путь к `vcvars64.bat` зашит в `build.ps1` (VS 
 | M6 | **Захват Desktop Duplication**: `D3D11CreateDevice` → QI `IDXGIOutput1` → `DuplicateOutput` → `AcquireNextFrame` → QI `ID3D11Texture2D` → staging `CreateTexture2D` → `CopyResource` → `Map` → контрольная сумма кадра | `a227b41` |
 | M7a | **GPU BGRA→NV12** через `ID3D11VideoProcessor`: enumerator → processor → NV12 RT-текстура + output view → input view на кадре → `VideoProcessorBlt` → чтение назад по Y/UV | `50b152d` |
 | M7b-1 | **Media Foundation + аппаратный HEVC-энкодер**: `MFStartup` → `MFTEnumEx` → `ActivateObject` → async unlock + low latency → HEVC-выход + NV12-вход → `GetOutputStreamInfo` → `ProcessMessage(BEGIN_STREAMING/START_OF_STREAM)` | `989d594` |
-| M7b-2 | **Асинхронный цикл энкодера**: `GetEvent` (`MF_EVENT_FLAG_NO_WAIT`) → `601 METransformNeedInput` → подача NV12-сэмпла → `602 METransformHaveOutput` → `ProcessOutput` → `ConvertToContiguousBuffer`/`Lock` → готовый Annex-B поток | — |
+| M7b-2 | **Асинхронный цикл энкодера**: `GetEvent` (`MF_EVENT_FLAG_NO_WAIT`) → `601 METransformNeedInput` → подача NV12-сэмпла → `602 METransformHaveOutput` → `ProcessOutput` → `ConvertToContiguousBuffer`/`Lock` → готовый Annex-B поток | `6a78053` |
+| M7c | **Тракт сомкнут**: кадр из захвата (M6) → GPU BGRA→NV12 (M7a) → копия реального NV12-кадра в буфер → энкодер (M7b) кодирует **этот самый кадр**. Доказано суммой яркости: `VPP: Y checksum` = `enc: input luma sum` = 33177600 | этот коммит |
 
 Живые подтверждения из лога:
 
@@ -47,20 +48,24 @@ adb devices:            d73f5cf6   device
 TCP client connected;   hello width=3000 height=2120 density=420 refresh=144
 READY sent (1920x1280 refresh=60 codec=2)
 adapter: Intel(R) Iris(R) Xe Graphics  vendor=32902 device=39497
-capture source: \\.\DISPLAY1 ; capture width=1920 height=1080 rowpitch=7680
-VPP: BGRA->NV12 blt ok ; Y checksum=143194976 ; UV checksum=133314356
+capture source: \\.\DISPLAY1 ; capture width=1920 height=1080 rowpitch=7680 ; capture frame ok
+VPP: BGRA->NV12 blt ok ; VPP: NV12 frame captured
+VPP: Y checksum=33177600 ; VPP: UV checksum=132710400
 MF: hardware HEVC encoder MFTs found=2 ; provides_samples=256
 MF: encoder configured (HEVC <- NV12)
-MF: encoded frames=3 ; total HEVC bytes=3130 ; first frame bytes=2881 ; HEVC encode OK
+  enc: input luma sum=33177600        <- тот же кадр, что захватили (не синтетика)
+MF: encoded frames=3 ; total HEVC bytes=1090 ; first frame bytes=823
+MF: first frame checksum=93186 ; MF: HEVC encode OK
 ```
 
 ## Следующее
 
-1. Отправить готовый Annex-B поток в TCP-сессии (сейчас M4 умеет только `HELLO`/`READY`).
-2. Zero-copy вход для энкодера: `MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager` (сейчас в
-   пробе путь через память, а кадр для энкодера — синтетический NV12, а не результат VPP).
-3. Сомкнуть тракт: захват (M6) → VPP (M7a) → энкодер (M7b) в один цикл; затем курсор (`CURSOR`),
-   ввод (`TOUCH`/`KEY` через `SendInput`), `PING`-heartbeat, single-instance, CLI (`--auto`/`--display`).
+1. Отправить готовый Annex-B поток в TCP-сессии (сейчас M4 умеет только `HELLO`/`READY`) — превратить
+   пробу в живой кадровый цикл: `AcquireNextFrame` → VPP → энкодер → `send`.
+2. Zero-copy вход для энкодера: `MFCreateDXGISurfaceBuffer` + `IMFDXGIDeviceManager` (сейчас кадр едет
+   через память: `Map` → копия строк в свой буфер → `Lock` входного буфера MFT).
+3. Курсор (`CURSOR`), ввод (`TOUCH`/`KEY` через `SendInput` с нормировкой по виртуальному десктопу),
+   `PING`-heartbeat, single-instance (named mutex), CLI (`--auto`/`--display`), High priority.
 
 ## Правила работы с COM в этом проекте
 
@@ -109,6 +114,19 @@ MF: encoded frames=3 ; total HEVC bytes=3130 ; first frame bytes=2881 ; HEVC enc
   `ProcessOutput` возвращает **его** сэмпл; освобождать его нельзя (это снимает ссылку самого MFT →
   AV внутри `d3d11`/MF). Рабочий Rust-хост делает `clone()` + drop (AddRef/Release пары) и не
   трогает ссылку MFT — в асме освобождение пропускается, когда `provides_samples != 0`.
+- **Строку-лимит цикла копирования считать арифметикой, а не «на глаз».** Копируя NV12 построчно, я
+  написал `mov edx,capH / add edx,edx / shr edx,1 / add edx,capH` — это `2*capH` (2160), а нужно
+  `3*capH/2` (1620). Цикл писал на мегабайт **за** буфер и падал на `rep movsb`, из-за чего я долго
+  искал причину в `rep`/DF/регистрах, пока не оказалось, что виновата арифметика. Правильно:
+  `mov eax,edx / shr eax,1 / add edx,eax`.
+- **Как ловить такие падения:** событие `Application/1000` даёт **смещение ошибки внутри нашего exe**,
+  а `dumpbin /disasm` по этому адресу называет точную инструкцию. Дальше — маркер в логе перед
+  подозрительным блоком и пробы «только запись» / «только чтение»: последние сразу показали, что обе
+  стороны диапазона валидны, то есть виноват не доступ к памяти, а её размер.
+- **Свои же `emit_*` — обычные функции и затирают волатильные регистры.** Если цикл держит указатель в
+  `r9`/`r10`/`r11`, а перед ним стоит отладочный вывод, регистры надо перечитать **после** вывода.
+- **MASM:** адрес метки берётся через `lea rdi, label` (`mov rdi, label` даёт A2022 — у метки `db`
+  размер байтовый), а `mov byte ptr [rdi], 0` неоднозначен — писать через регистр (`mov [rdi], al`).
 
 ## Структура `src\main.asm`
 
