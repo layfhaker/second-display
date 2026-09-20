@@ -39,16 +39,18 @@ const IID_ID3D11TEXTURE2D: GUID = GUID::from_u128(0x6f15aaf2_d208_4e89_9ab4_4895
 /// How long `dispose` waits for the event thread before detaching it.
 const TEARDOWN_WAIT: Duration = Duration::from_millis(1500);
 
-/// The Media Foundation platform is process-wide. Start it once and never shut it down per encoder:
-/// a `MFShutdown` on every recreate blocks while other MF work is in flight, which used to wedge the
-/// streaming thread for good (black screen, no recovery) whenever an encoder faulted.
-static MF_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-
+/// Start the Media Foundation platform for this encoder and tear it down again in `dispose`.
+///
+/// This is NOT what fixes the memory growth (that was our own leaked reference to the MFT's output
+/// sample - see `drain_output`), so it is deliberately left out: a `MFShutdown` on every recreate
+/// blocks while other MF work is in flight, which once wedged the streaming thread for good.
 fn mf_startup() -> Result<(), String> {
     MF_INIT
         .get_or_init(|| unsafe { MFStartup(0x0002_0070, 0).map_err(|e| e.to_string()) })
         .clone()
 }
+
+static MF_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn pack(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64
@@ -423,6 +425,17 @@ fn drain_output(
         };
         let mut status = 0u32;
         let res = transform.ProcessOutput(0, std::slice::from_mut(&mut odb), &mut status);
+
+        // The MFT writes the sample it produced (and possibly an events collection) into these two
+        // ManuallyDrop fields, and ManuallyDrop is never dropped automatically - so leaving them in
+        // place leaked one reference per encoded frame, pinning the sample's buffer with it. That was
+        // the ~2.9 MB per frame / tens of GB of commit we chased for hours: our heap stayed at 12 MB
+        // while the commit climbed, because the object is released by neither MFShutdown nor dropping
+        // the MFT. Take both so they Release when this function returns, exactly as the C# reference
+        // does (sample.Dispose() + odb.Events?.Dispose()).
+        let out_sample: Option<IMFSample> = std::mem::ManuallyDrop::take(&mut odb.pSample);
+        let _out_events = std::mem::ManuallyDrop::take(&mut odb.pEvents);
+
         if let Err(e) = res {
             if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
                 return Ok(());
@@ -430,7 +443,6 @@ fn drain_output(
             return Err(e);
         }
 
-        let out_sample = (*odb.pSample).clone();
         let Some(out_sample) = out_sample else {
             return Ok(());
         };
