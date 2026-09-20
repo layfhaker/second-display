@@ -1386,7 +1386,16 @@ cap_frame_begin:
     lea     r9, pRes
     call    qword ptr [rax+64]
     test    eax, eax
-    jnz     cap_acq_fail
+    jz      cap_acq_ok
+    ; DXGI_ERROR_WAIT_TIMEOUT (0x887A0027) means the captured display simply has not changed yet. That
+    ; is not a failure: tearing the session down here is what left the app connected with zero frames
+    ; sent while the virtual display sat still. Wait and try again.
+    cmp     eax, 887A0027h
+    jne     cap_acq_fail
+    mov     ecx, 5
+    call    Sleep
+    jmp     cap_frame_begin
+cap_acq_ok:
 
     ; ---- the acquired IDXGIResource is an ID3D11Texture2D ----
     mov     rcx, pRes
@@ -1873,6 +1882,16 @@ cap_frame_live:
     mov     eax, liveCount
     cmp     eax, liveFrames
     jae     cap_frame_done
+
+    ; The MFT emits its keyframe on the first frame it is fed, and the first frame of a session can be
+    ; empty because the desktop is not composited yet. Feeding that one gives the client a black
+    ; keyframe and every later frame is a P-frame against it, so the tablet stays black. Drop it.
+    cmp     dword ptr [liveCount], 1
+    jne     cap_live_feed
+    call    cap_release_frame
+    jmp     cap_frame_begin
+cap_live_feed:
+
     cmp     dword ptr [feedToggle], 0
     je      cap_frame_release
     call    mark_start
