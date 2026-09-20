@@ -981,9 +981,11 @@ draw_cursor proc
     push    rbx
     push    rsi
     push    rdi
+    push    r10
+    push    r11
     push    r12
     push    r13
-    sub     rsp, 30h
+    sub     rsp, 20h
     lea     rcx, curPt
     call    GetCursorPos
     test    eax, eax
@@ -1033,9 +1035,11 @@ dc_next_row:
     inc     esi
     jmp     dc_row
 dc_done:
-    add     rsp, 30h
+    add     rsp, 20h
     pop     r13
     pop     r12
+    pop     r11
+    pop     r10
     pop     rdi
     pop     rsi
     pop     rbx
