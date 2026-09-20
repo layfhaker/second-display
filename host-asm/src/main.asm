@@ -2383,7 +2383,9 @@ mf_out_created:
     mov     rcx, pOutType
     mov     rax, [rcx]
     lea     rdx, mfMtAvgBitrate
-    mov     r8d, 0B71B00h                  ; 12 000 000
+    mov     r8d, 1C9C380h                  ; 30 000 000: the rate control sizes its output sample for
+                                           ; the average bitrate at the declared 30 fps, and at the
+                                           ; capture rate we actually feed, 12 Mbps clipped most frames
     call    qword ptr [rax+168]            ; SetUINT32(AVG_BITRATE)
     mov     rcx, pOutType
     mov     rax, [rcx]
