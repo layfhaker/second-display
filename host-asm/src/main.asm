@@ -60,6 +60,8 @@ EXTERN WaitForSingleObject:PROC
 EXTERN GetExitCodeProcess:PROC
 EXTERN GetLastError:PROC
 EXTERN Sleep:PROC
+EXTERN QueryPerformanceCounter:PROC
+EXTERN QueryPerformanceFrequency:PROC
 
 ; ---- winsock imports (ws2_32) ----
 EXTERN WSAStartup:PROC
@@ -191,6 +193,16 @@ szVpBlt    db "VPP: VideoProcessorBlt hr=", 0
 szVpStg    db "VPP: NV12 staging CreateTexture2D hr=", 0
 szVpBgra   db "VPP: BGRA CreateTexture2D hr=", 0
 szLiveFrame db "live frame #", 13, 10, 0
+szStageHead db "live stages total ms: acquire=", 0
+szStageBlt db " blt=", 0
+szStageRead db " readback=", 0
+szStagePump db " pump=", 0
+szStageFrames db " frames=", 0
+szStageHeadPf db "live per-frame ms: acquire=", 0
+szStageBltPf db " blt=", 0
+szStageReadPf db " readback=", 0
+szStagePumpPf db " pump=", 0
+szStageCrlf db 13, 10, 0
 szVpMap    db "VPP: NV12 Map hr=", 0
 szVpOk     db "VPP: BGRA->NV12 blt ok", 13, 10, 0
 szVpCopyDone db "VPP: NV12 frame captured", 13, 10, 0
@@ -362,6 +374,17 @@ sendPtr   dq ?                 ; Annex-B payload currently being sent
 sendLen   dd ?
 sentFrames dd ?
 sentBytes dd ?
+; ---- per-stage timing for the live loop (performance-counter ticks) ----
+qpcFreq   dq ?                 ; ticks per second, measured once before the live loop
+qpcTmp    dq ?                 ; scratch for QueryPerformanceCounter
+tMark     dq ?                 ; stage start, written by mark_start
+accPtr    dq ?                 ; accumulator that the current mark_acc adds to
+accAcquire dq ?                ; AcquireNextFrame + QI of the desktop texture
+accBlt    dq ?                 ; VideoProcessorBlt
+accRead   dq ?                 ; NV12 Map + row-wise copy into nv12Frame
+accPump   dq ?                 ; encoder feed/drain/send
+accFrames dd ?                 ; encoded frames, i.e. pump calls
+divisor   dd ?                 ; scratch for the per-frame division in the report
 pktOut    db 32 dup(?)         ; VIDEO header + meta staging area
 nv12Frame db 3110400 dup(?)    ; the captured frame, de-pitched (luma then chroma, 1920x1080)
 devDesc   db 320 dup(?)        ; DXGI_ADAPTER_DESC of the device's adapter
@@ -1347,6 +1370,7 @@ cp_have_dup:
 
 cap_frame_begin:
     ; ---- AcquireNextFrame(5000, &frameInfo, &resource) ----
+    call    mark_start
     mov     rcx, pDup
     mov     rax, [rcx]
     mov     edx, 5000
@@ -1364,6 +1388,9 @@ cap_frame_begin:
     call    qword ptr [rax+0]
     test    eax, eax
     jnz     cap_acq_fail
+
+    lea     rcx, accAcquire
+    call    mark_acc
 
     ; Trace the first few live frames: enough to see how far the cycle gets without flooding the log.
     cmp     dword ptr [liveMode], 0
@@ -1649,6 +1676,7 @@ cap_after_setup:
     mov     rax, pVpInView
     mov     qword ptr [r10+32], rax        ; pInputSurface
 
+    call    mark_start
     mov     rcx, pVideoContext
     mov     rax, [rcx]
     mov     rdx, pVpProc
@@ -1660,6 +1688,8 @@ cap_after_setup:
     call    qword ptr [rax+424]            ; VideoProcessorBlt
     test    eax, eax
     jnz     vp_blt_fail
+    lea     rcx, accBlt
+    call    mark_acc
     lea     rcx, szVpOk
     call    emit_z
 
@@ -1698,6 +1728,7 @@ cap_stg_created:
     mov     r8, pNv12Tex
     call    qword ptr [rax+376]            ; CopyResource
 
+    call    mark_start
     mov     rcx, pContext
     mov     rax, [rcx]
     mov     rdx, pNv12Stg
@@ -1800,6 +1831,8 @@ vp_copy_bdone:
 vp_copy_done:
     pop     rdi
     pop     rsi
+    lea     rcx, accRead
+    call    mark_acc
     mov     dword ptr [haveFrame], 1
     cmp     dword ptr [liveMode], 0
     jne     cap_frame_logged               ; live mode: no per-frame chatter in the log
@@ -1835,7 +1868,11 @@ cap_frame_live:
     jae     cap_frame_done
     cmp     dword ptr [feedToggle], 0
     je      cap_frame_release
+    call    mark_start
     call    run_encoder_loop               ; pump: feeds on need-input, drains and sends on have-output
+    lea     rcx, accPump
+    call    mark_acc
+    inc     dword ptr [accFrames]
     cmp     dword ptr [streamSock], 0      ; the client went away
     je      cap_frame_done
 cap_frame_release:
@@ -2100,6 +2137,116 @@ copy16 proc
     mov     qword ptr [rcx+8], rax
     ret
 copy16 endp
+
+; ---- per-stage timing: mark_start before the work, mark_acc(accumulator) after it ----
+mark_start proc
+    sub     rsp, 28h
+    lea     rcx, qpcTmp
+    call    QueryPerformanceCounter
+    mov     rax, qpcTmp
+    mov     tMark, rax
+    add     rsp, 28h
+    ret
+mark_start endp
+
+; rcx = accumulator. Ticks are kept raw; the report divides by the measured frequency.
+mark_acc proc
+    sub     rsp, 28h
+    mov     accPtr, rcx
+    lea     rcx, qpcTmp
+    call    QueryPerformanceCounter
+    mov     rcx, accPtr
+    mov     rax, qpcTmp
+    sub     rax, tMark
+    add     qword ptr [rcx], rax
+    add     rsp, 28h
+    ret
+mark_acc endp
+
+; rcx = ticks -> eax = milliseconds. Clobbers rax/rcx/rdx/r8.
+ticks_to_ms proc
+    mov     rax, rcx
+    xor     edx, edx
+    mov     r8, 1000
+    mul     r8
+    mov     rcx, qpcFreq
+    test    rcx, rcx
+    jz      ttm_done
+    div     rcx
+ttm_done:
+    ret
+ticks_to_ms endp
+
+; One line of totals plus one of per-frame averages for the live loop.
+emit_stage_report proc
+    sub     rsp, 38h
+
+    mov     rcx, accAcquire
+    call    ticks_to_ms
+    mov     edx, eax
+    lea     rcx, szStageHead
+    call    emit_num
+    mov     rcx, accBlt
+    call    ticks_to_ms
+    mov     edx, eax
+    lea     rcx, szStageBlt
+    call    emit_num
+    mov     rcx, accRead
+    call    ticks_to_ms
+    mov     edx, eax
+    lea     rcx, szStageRead
+    call    emit_num
+    mov     rcx, accPump
+    call    ticks_to_ms
+    mov     edx, eax
+    lea     rcx, szStagePump
+    call    emit_num
+    lea     rcx, szStageFrames
+    mov     edx, accFrames
+    call    emit_num
+    lea     rcx, szStageCrlf
+    call    emit_z
+
+    mov     ecx, accFrames
+    test    ecx, ecx
+    jz      esr_done
+    mov     divisor, ecx
+
+    mov     rcx, accAcquire
+    call    ticks_to_ms
+    xor     edx, edx
+    div     divisor
+    mov     edx, eax
+    lea     rcx, szStageHeadPf
+    call    emit_num
+    mov     rcx, accBlt
+    call    ticks_to_ms
+    xor     edx, edx
+    div     divisor
+    mov     edx, eax
+    lea     rcx, szStageBltPf
+    call    emit_num
+    mov     rcx, accRead
+    call    ticks_to_ms
+    xor     edx, edx
+    div     divisor
+    mov     edx, eax
+    lea     rcx, szStageReadPf
+    call    emit_num
+    mov     rcx, accPump
+    call    ticks_to_ms
+    xor     edx, edx
+    div     divisor
+    mov     edx, eax
+    lea     rcx, szStagePumpPf
+    call    emit_num
+
+esr_done:
+    lea     rcx, szStageCrlf
+    call    emit_z
+    add     rsp, 38h
+    ret
+emit_stage_report endp
 
 ; Media Foundation HEVC encoder probe: start the platform, enumerate the hardware HEVC encoder
 ; MFT, activate it, unlock async + low latency, set the HEVC output type and the NV12 input type,
@@ -2887,7 +3034,15 @@ mainCRTStartup proc
     call    run_dxgi_probe
 
     ; ---- Desktop Duplication capture: the live capture+encode cycle ----
+    lea     rcx, qpcFreq
+    call    QueryPerformanceFrequency
     call    run_capture_probe
+
+    ; ---- stage timings of the live loop (ticks -> ms) ----
+    cmp     dword ptr [liveMode], 0
+    je      skip_stage_report
+    call    emit_stage_report
+skip_stage_report:
 
     mov     rcx, logHandle
     call    CloseHandle
