@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace SecondDisplay.Host;
 
@@ -36,7 +37,10 @@ public sealed class AdbController
         _package = package;
         _port = port;
         AdbPath = ResolveAdbPath(adbPathOverride);
+        _link.StartTracker();
     }
+
+    private readonly AdbLink _link = new();
 
     private string ResolveAdbPath(string? adbPathOverride)
     {
@@ -163,6 +167,21 @@ public sealed class AdbController
 
     public IReadOnlyList<string> ListDevices()
     {
+        // Fast path: the persistent track-devices feed (no spawn, no per-poll handshake).
+        // Falls through to socket query, then to `adb.exe`, on any gap.
+        try
+        {
+            var snap = _link.Snapshot();
+            if (snap != null)
+                return AuthorizedFromPairs(snap, checkUnauthorized: true);
+            byte[] payload = AdbLink.Query("host:devices", DevicesTimeoutMs);
+            Interlocked.Exchange(ref _consecutiveTimeouts, 0);
+            return AuthorizedFromPairs(AdbLink.ParseDevicePairs(payload), checkUnauthorized: true);
+        }
+        catch
+        {
+            // Socket fast path unavailable — fall through to adb.exe below.
+        }
         try
         {
             var (exitCode, stdout, _) = RunAdb(DevicesTimeoutMs, "devices");
@@ -223,6 +242,29 @@ public sealed class AdbController
         }
     }
 
+    private IReadOnlyList<string> AuthorizedFromPairs(
+        List<(string Serial, string State)> pairs, bool checkUnauthorized)
+    {
+        var devices = new List<string>();
+        bool sawUnauthorized = false;
+        foreach (var (serial, state) in pairs)
+        {
+            if (state == "device")
+            {
+                devices.Add(serial);
+            }
+            else if (state == "unauthorized" || state == "offline" || state == "no permissions")
+            {
+                Console.WriteLine($"[adb] device {serial} status={state}, skipping");
+                if (state == "unauthorized")
+                    sawUnauthorized = true;
+            }
+        }
+        if (checkUnauthorized && sawUnauthorized && devices.Count == 0)
+            MaybeRestartForUnauthorized();
+        return devices.OrderBy(x => x).ToList();
+    }
+
     private bool HasAuthorizedDevice(IReadOnlyList<string> devices)
     {
         // Devices list already contains only "device"-status serials.
@@ -268,6 +310,13 @@ public sealed class AdbController
     {
         try
         {
+            byte[] outBytes = AdbLink.TransportExec(serial, $"shell:pm list packages {_package}", DefaultAdbTimeoutMs);
+            if (Encoding.UTF8.GetString(outBytes).Contains($"package:{_package}"))
+                return true;
+        }
+        catch { /* socket fast path unavailable — fall through to adb.exe */ }
+        try
+        {
             var (exitCode, stdout, _) = RunAdb("-s", serial, "shell", "pm", "list", "packages", _package);
             if (exitCode != 0)
                 return false;
@@ -282,6 +331,12 @@ public sealed class AdbController
 
     public void SetupReverse(string serial)
     {
+        try
+        {
+            AdbLink.TransportExec(serial, $"reverse:forward:tcp:{_port};tcp:{_port}", DefaultAdbTimeoutMs, 64);
+            return;
+        }
+        catch { /* fall through to adb.exe */ }
         var (exitCode, _, stderr) = RunAdb("-s", serial, "reverse", $"tcp:{_port}", $"tcp:{_port}");
         if (exitCode != 0)
         {
@@ -291,6 +346,12 @@ public sealed class AdbController
 
     public void RemoveReverse(string serial)
     {
+        try
+        {
+            AdbLink.TransportExec(serial, $"reverse:killforward:tcp:{_port}", ReverseRemoveTimeoutMs, 64);
+            return;
+        }
+        catch { /* fall through to adb.exe */ }
         try
         {
             // Short timeout: this runs during teardown and used to hang ~15s when adb had degraded.
@@ -305,6 +366,12 @@ public sealed class AdbController
     public void LaunchClient(string serial)
     {
         string component = $"{_package}/.MainActivity";
+        try
+        {
+            AdbLink.TransportExec(serial, $"shell:am start -n {component}", DefaultAdbTimeoutMs);
+            return;
+        }
+        catch { /* fall through to adb.exe */ }
         var (exitCode, stdout, stderr) = RunAdb("-s", serial, "shell", "am", "start", "-n", component);
 
         if (exitCode != 0)
@@ -335,6 +402,13 @@ public sealed class AdbController
 
         try
         {
+            byte[] outBytes = AdbLink.TransportExec(serial, $"shell:{script}", ShellTimeoutMs, 1024);
+            return DeviceReadiness.Parse(Encoding.UTF8.GetString(outBytes));
+        }
+        catch { /* socket fast path unavailable — fall through to adb.exe */ }
+
+        try
+        {
             var (exitCode, stdout, _) = RunAdb(ShellTimeoutMs, "-s", serial, "shell", script);
             if (exitCode != 0)
                 return new DeviceReadiness(false, "adb shell command failed");
@@ -354,20 +428,34 @@ public sealed class AdbController
     {
         try
         {
+            byte[] outBytes = AdbLink.TransportExec(serial,
+                $"shell:logcat -d -v time -t {lines} -s SecondDisplay:V AndroidRuntime:E CRASH:E DEBUG:E",
+                DefaultAdbTimeoutMs);
+            PrintLogcat(serial, Encoding.UTF8.GetString(outBytes));
+            return;
+        }
+        catch { /* fall through to adb.exe */ }
+        try
+        {
             var (exitCode, stdout, _) = RunAdb("-s", serial, "logcat", "-d", "-v", "time", "-t", lines.ToString(),
                 "-s", "SecondDisplay:V", "AndroidRuntime:E", "CRASH:E", "DEBUG:E");
 
-            if (exitCode == 0 && !string.IsNullOrWhiteSpace(stdout))
-            {
-                Console.WriteLine($"[adb-logcat] Recent Android logs from {serial}:");
-                foreach (var line in stdout.Split('\n'))
-                {
-                    string t = line.Trim();
-                    if (!string.IsNullOrEmpty(t))
-                        Console.WriteLine($"  [tablet] {t}");
-                }
-            }
+            if (exitCode == 0)
+                PrintLogcat(serial, stdout);
         }
         catch { }
+    }
+
+    private static void PrintLogcat(string serial, string stdout)
+    {
+        if (string.IsNullOrWhiteSpace(stdout))
+            return;
+        Console.WriteLine($"[adb-logcat] Recent Android logs from {serial}:");
+        foreach (var line in stdout.Split('\n'))
+        {
+            string t = line.Trim();
+            if (!string.IsNullOrEmpty(t))
+                Console.WriteLine($"  [tablet] {t}");
+        }
     }
 }

@@ -22,7 +22,7 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found: $vcvars" }
 $obj = Join-Path $outDir 'main.obj'
 $exe = Join-Path $outDir 'SecondDisplay.Host.Asm.exe'
 
-& cmd /c "call `"$vcvars`" >nul && ml64 /nologo /c /Fo`"$obj`" `"$asmSrc`" && link /nologo /SUBSYSTEM:CONSOLE /ENTRY:mainCRTStartup /OUT:`"$exe`" `"$obj`" kernel32.lib user32.lib ws2_32.lib ole32.lib dxgi.lib d3d11.lib mfplat.lib"
+& cmd /c "call `"$vcvars`" >nul && ml64 /nologo /c /Fo`"$obj`" `"$asmSrc`" && link /nologo /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /OUT:`"$exe`" `"$obj`" kernel32.lib user32.lib gdi32.lib ws2_32.lib ole32.lib dxgi.lib d3d11.lib mfplat.lib windowsapp.lib libcmt.lib libcpmt.lib libvcruntime.lib libucrt.lib /MANIFEST:EMBED `"/MANIFESTUAC:level='asInvoker' uiAccess='false'`""
 if ($LASTEXITCODE -ne 0) { throw "assembly build failed ($LASTEXITCODE)" }
 
 Write-Host "DONE: $exe" -ForegroundColor Green

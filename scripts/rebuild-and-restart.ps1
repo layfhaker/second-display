@@ -19,7 +19,7 @@ Get-Process -Name "SecondDisplay.Host" -ErrorAction SilentlyContinue | Stop-Proc
 Start-Sleep -Seconds 1
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
-$hostProj = Join-Path $repoRoot 'host\SecondDisplay.Host\SecondDisplay.Host.csproj'
+$hostProj = Join-Path $repoRoot 'host-c#\SecondDisplay.Host\SecondDisplay.Host.csproj'
 
 Write-Host "Rebuilding host in Release..."
 & dotnet build "$hostProj" -c Release

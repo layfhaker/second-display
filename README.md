@@ -49,7 +49,7 @@ The current artifact is a debug APK intended for testing.
 
 | Папка       | Что это                                     | Язык          | Статус |
 |-------------|---------------------------------------------|---------------|--------|
-| `host/`     | Хост: захват (DXGI/GDI), HEVC, TCP, тач     | C# (.NET 8)   | ✅ работает (эталон) |
+| `host-c#/`  | Хост: захват (DXGI/GDI), HEVC, TCP, тач     | C# (.NET 8)   | ✅ работает (оригинал) |
 | `host-rs/`  | Хост, переписанный с нуля тем же трактом    | Rust          | ✅ **боевой** (задача `SecondDisplayHost`) |
 | `host-asm/` | Хост на голом MASM (исследование: без C#/Rust)| Ассемблер   | 🚧 M1–M7b-1 (см. `host-asm/README.md`) |
 | `android/`  | Клиент: MediaCodec-декод, отрисовка, тач    | Kotlin        | ✅ работает |
@@ -60,7 +60,7 @@ The current artifact is a debug APK intended for testing.
 
 ```powershell
 # 1. host: захват виртуального дисплея (печатает список мониторов; выбери индекс VDD)
-dotnet run --project "host\SecondDisplay.Host" -- --display 2
+dotnet run --project "host-c#\SecondDisplay.Host" -- --display 2
 
 # 2. туннель + клиент
 adb reverse tcp:27315 tcp:27315

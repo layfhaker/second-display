@@ -8,6 +8,7 @@ using SecondDisplay.Host;
 static extern bool AttachConsole(int dwProcessId);
 AttachConsole(-1);
 
+
 // Make process per-monitor DPI aware so we capture the FULL screen resolution,
 // not the DPI-virtualized one (otherwise only a corner of the screen is captured).
 DpiHelper.EnablePerMonitorDpiAwareness();
@@ -47,7 +48,8 @@ if (args.Length > 0 && args[0] == "--selftest-hevc")
     return;
 }
 
-if (args.Length > 0 && args[0] == "--auto")
+bool isManual = args.Contains("--manual") || args.Contains("--display") || args.Contains("--region");
+if (!isManual)
 {
     // Acquire the single-instance guard BEFORE touching the log file, so a blocked second
     // instance never truncates the running instance's log.

@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Run this once per machine. It self-elevates (one UAC prompt), builds
-    host/SecondDisplay.Host in Release, and registers a scheduled task named
+    host-c#/SecondDisplay.Host in Release, and registers a scheduled task named
     "SecondDisplayHost" that launches "SecondDisplay.Host.exe --auto" hidden at user logon.
 #>
 
@@ -26,7 +26,7 @@ if (-not $isAdmin) {
 
 try {
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
-    $hostProj = Join-Path $repoRoot 'host\SecondDisplay.Host\SecondDisplay.Host.csproj'
+    $hostProj = Join-Path $repoRoot 'host-c#\SecondDisplay.Host\SecondDisplay.Host.csproj'
     if (-not (Test-Path $hostProj)) {
         throw "Host project not found at: $hostProj"
     }
@@ -37,7 +37,7 @@ try {
         throw "dotnet build failed with exit code $LASTEXITCODE"
     }
 
-    $exePath = Join-Path $repoRoot 'host\SecondDisplay.Host\bin\Release\net8.0-windows\SecondDisplay.Host.exe'
+    $exePath = Join-Path $repoRoot 'host-c#\SecondDisplay.Host\bin\Release\net8.0-windows\SecondDisplay.Host.exe'
     if (-not (Test-Path $exePath)) {
         throw "Build succeeded but exe not found at: $exePath"
     }

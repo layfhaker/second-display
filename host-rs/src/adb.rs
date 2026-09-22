@@ -1,5 +1,6 @@
 //! Thin wrapper over `adb.exe`, mirroring the C# `AdbController`.
 
+use crate::adblink;
 use crate::device_readiness::DeviceReadiness;
 use crate::logline;
 use std::os::windows::process::CommandExt;
@@ -36,6 +37,8 @@ pub struct AdbController {
     /// When false, adb-server auto-restarts are suppressed (never during an active stream:
     /// `kill-server` tears down the `adb reverse` tunnel and kills the client).
     pub auto_restart_enabled: AtomicBool,
+    /// Persistent `host:track-devices` feed from the adb server (zero-spawn hot path).
+    tracker: adblink::DeviceTracker,
 }
 
 impl AdbController {
@@ -48,6 +51,7 @@ impl AdbController {
             last_timeout_restart: Mutex::new(None),
             last_unauthorized_restart: Mutex::new(None),
             auto_restart_enabled: AtomicBool::new(true),
+            tracker: adblink::DeviceTracker::start(),
         }
     }
 
@@ -89,6 +93,43 @@ impl AdbController {
     }
 
     pub fn list_devices(&self) -> Vec<String> {
+        // Fast path: the persistent track-devices feed (no spawn, no per-poll handshake).
+        // Falls through to socket query, then to `adb.exe`, on any gap.
+        if let Some(pairs) = self.tracker.snapshot() {
+            let devices = Self::authorized_from_pairs(&pairs);
+            if devices.is_empty() && pairs.iter().any(|(_, s)| s == "unauthorized") {
+                self.maybe_restart_for_unauthorized();
+            }
+            return devices;
+        }
+        match adblink::query("host:devices", DEVICES_TIMEOUT_MS) {
+            Ok(payload) => {
+                let pairs = adblink::parse_device_pairs(&payload);
+                self.consecutive_timeouts.store(0, Ordering::SeqCst);
+                let devices = Self::authorized_from_pairs(&pairs);
+                if devices.is_empty() && pairs.iter().any(|(_, s)| s == "unauthorized") {
+                    self.maybe_restart_for_unauthorized();
+                }
+                devices
+            }
+            Err(_) => self.list_devices_via_exe(),
+        }
+    }
+
+    fn authorized_from_pairs(pairs: &[(String, String)]) -> Vec<String> {
+        let mut devices = Vec::new();
+        for (serial, status) in pairs {
+            if status == "device" {
+                devices.push(serial.clone());
+            } else if matches!(status.as_str(), "unauthorized" | "offline" | "no permissions") {
+                logline!("[adb] device {serial} status={status}, skipping");
+            }
+        }
+        devices.sort();
+        devices
+    }
+
+    fn list_devices_via_exe(&self) -> Vec<String> {
         let r = self.run_adb_timeout(&["devices"], DEVICES_TIMEOUT_MS);
         if r.code != 0 {
             self.maybe_restart_for_timeouts();
@@ -129,11 +170,19 @@ impl AdbController {
     }
 
     pub fn has_app(&self, serial: &str) -> bool {
+        let local = format!("shell:pm list packages {}", self.package);
+        if let Ok(out) = adblink::transport_exec(serial, &local, DEFAULT_TIMEOUT_MS, 65536) {
+            return String::from_utf8_lossy(&out).contains(&format!("package:{}", self.package));
+        }
         let r = self.run_adb(&["-s", serial, "shell", "pm", "list", "packages", &self.package]);
         r.code == 0 && r.stdout.contains(&format!("package:{}", self.package))
     }
 
     pub fn setup_reverse(&self, serial: &str) -> Result<(), String> {
+        let local = format!("reverse:forward:tcp:{0};tcp:{0}", self.port);
+        if adblink::transport_exec(serial, &local, DEFAULT_TIMEOUT_MS, 64).is_ok() {
+            return Ok(());
+        }
         let port = format!("tcp:{}", self.port);
         let r = self.run_adb(&["-s", serial, "reverse", &port, &port]);
         if r.code != 0 {
@@ -143,6 +192,10 @@ impl AdbController {
     }
 
     pub fn remove_reverse(&self, serial: &str) {
+        let local = format!("reverse:killforward:tcp:{}", self.port);
+        if adblink::transport_exec(serial, &local, REVERSE_REMOVE_TIMEOUT_MS, 64).is_ok() {
+            return;
+        }
         let port = format!("tcp:{}", self.port);
         let _ = self.run_adb_timeout(
             &["-s", serial, "reverse", "--remove", &port],
@@ -152,6 +205,10 @@ impl AdbController {
 
     pub fn launch_client(&self, serial: &str) {
         let component = format!("{}/.MainActivity", self.package);
+        let local = format!("shell:am start -n {component}");
+        if adblink::transport_exec(serial, &local, DEFAULT_TIMEOUT_MS, 4096).is_ok() {
+            return;
+        }
         let r = self.run_adb(&["-s", serial, "shell", "am", "start", "-n", &component]);
         if r.code != 0 {
             logline!("[adb] LaunchClient warning: exit code {}", r.code);
@@ -165,6 +222,9 @@ case \"$w\" in *Awake*) ;; *) echo \"SCREEN_OFF\"; exit 0;; esac;\
 l=$(cmd statusbar is-keyguard-locked 2>/dev/null);\
 if [ \"$l\" = \"true\" ]; then echo \"LOCKED\"; exit 0; fi;\
 echo \"READY\"";
+        if let Ok(out) = adblink::transport_exec(serial, &format!("shell:{script}"), SHELL_TIMEOUT_MS, 1024) {
+            return DeviceReadiness::parse(&String::from_utf8_lossy(&out));
+        }
         let r = self.run_adb_timeout(&["-s", serial, "shell", script], SHELL_TIMEOUT_MS);
         if r.code != 0 {
             return DeviceReadiness { ready: false, reason: "adb shell command failed".into() };
@@ -173,18 +233,30 @@ echo \"READY\"";
     }
 
     pub fn dump_crash_logs(&self, serial: &str, lines: u32) {
+        let local = format!("shell:logcat -d -v time -t {lines} -s SecondDisplay:V AndroidRuntime:E CRASH:E DEBUG:E");
+        if let Ok(out) = adblink::transport_exec(serial, &local, DEFAULT_TIMEOUT_MS, 65536) {
+            Self::print_logcat(serial, &String::from_utf8_lossy(&out));
+            return;
+        }
         let n = lines.to_string();
         let r = self.run_adb(&[
             "-s", serial, "logcat", "-d", "-v", "time", "-t", &n, "-s", "SecondDisplay:V",
             "AndroidRuntime:E", "CRASH:E", "DEBUG:E",
         ]);
-        if r.code == 0 && !r.stdout.trim().is_empty() {
-            logline!("[adb-logcat] Recent Android logs from {serial}:");
-            for l in r.stdout.lines() {
-                let t = l.trim();
-                if !t.is_empty() {
-                    logline!("  [tablet] {t}");
-                }
+        if r.code == 0 {
+            Self::print_logcat(serial, &r.stdout);
+        }
+    }
+
+    fn print_logcat(serial: &str, stdout: &str) {
+        if stdout.trim().is_empty() {
+            return;
+        }
+        logline!("[adb-logcat] Recent Android logs from {serial}:");
+        for l in stdout.lines() {
+            let t = l.trim();
+            if !t.is_empty() {
+                logline!("  [tablet] {t}");
             }
         }
     }

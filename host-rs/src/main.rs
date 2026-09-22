@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adb;
+mod adblink;
 mod convert;
 mod device_readiness;
 mod display_config;
@@ -97,7 +98,11 @@ fn main() {
         adb::AdbController::new(get_arg(&args, "--adb"), "com.seconddisplay.client", 27315);
     logline!("adb = {}", adb.adb_path());
 
-    if has_flag(&args, "--auto") {
+    let is_manual = has_flag(&args, "--manual")
+        || has_flag(&args, "--display")
+        || get_arg(&args, "--display").is_some()
+        || get_arg(&args, "--region").is_some();
+    if !is_manual {
         let vdd = vdd::VddController::new();
         orchestrator::Orchestrator::new(opts, adb, vdd).run(&AtomicBool::new(false));
         return;

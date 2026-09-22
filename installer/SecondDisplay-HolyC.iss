@@ -1,34 +1,32 @@
-; SecondDisplay installer (Inno Setup 6).
-; Build it with scripts\build-release.ps1, which passes /DMyAppVersion and /DSourceDir.
-;
-; What it does:
-;   - installs the host into %ProgramFiles%\SecondDisplay (64-bit);
-;   - bundles the Android client APK and platform-tools (adb);
-;   - registers the SecondDisplayHost autostart scheduled task (elevated, interactive session);
-;   - pushes the client APK to the connected tablet over adb (mandatory step during install);
-;   - the host writes its runtime log to %LOCALAPPDATA%\SecondDisplay\host.log.
+; SecondDisplay HolyC Host installer (Inno Setup 6).
+; Built with scripts\build-installers.ps1.
 
-#define MyAppName "SecondDisplay"
+#define MyAppName "SecondDisplay (HolyC)"
 #define MyAppPublisher "SecondDisplay"
+#define HostExeName "SecondDisplay.Host.HolyC.exe"
+#define TaskName "SecondDisplayHostHolyC"
+
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"
 #endif
+
 #ifndef SourceDir
-  #define SourceDir "..\build\staging"
+  #define SourceDir "..\build\staging-holyc"
 #endif
+
 ; Pass /DLangRu or /DLangEn for single-language installers; neither = multi-language.
 #ifdef LangRu
-  #define OutName "SecondDisplay-Setup-" + MyAppVersion + "-ru"
+  #define OutName "SecondDisplay-HolyC-Setup-" + MyAppVersion + "-ru"
 #else
   #ifdef LangEn
-    #define OutName "SecondDisplay-Setup-" + MyAppVersion + "-en"
+    #define OutName "SecondDisplay-HolyC-Setup-" + MyAppVersion + "-en"
   #else
-    #define OutName "SecondDisplay-Setup-" + MyAppVersion
+    #define OutName "SecondDisplay-HolyC-Setup-" + MyAppVersion
   #endif
 #endif
 
 [Setup]
-AppId={{B7E2A9C4-1D3F-4E7A-9C21-5F8D2B6A0E13}
+AppId={{DA04C9F6-3F5B-4A9C-BE43-7FA04D8C2E35}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -44,9 +42,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
-InfoBeforeFile=
-; The host is a signed-by-nobody personal build; keep it simple, no restart prompt.
 CloseApplications=no
+ShowLanguageDialog=yes
 
 [Languages]
 #ifdef LangRu
@@ -60,29 +57,54 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
   #endif
 #endif
 
+[CustomMessages]
+#ifdef LangRu
+AutostartTask=Запускать SecondDisplay (HolyC) при входе в систему (нужны права администратора)
+AutostartGroup=Автозапуск:
+RunNow=Запустить SecondDisplay (HolyC) сейчас
+UninstallProgram=Удалить {#MyAppName}
+#else
+  #ifdef LangEn
+AutostartTask=Start SecondDisplay (HolyC) automatically at logon (requires administrator privileges)
+AutostartGroup=Autostart:
+RunNow=Start SecondDisplay (HolyC) now
+UninstallProgram=Uninstall {#MyAppName}
+  #else
+en.AutostartTask=Start SecondDisplay (HolyC) automatically at logon (requires administrator privileges)
+en.AutostartGroup=Autostart:
+en.RunNow=Start SecondDisplay (HolyC) now
+en.UninstallProgram=Uninstall {#MyAppName}
+ru.AutostartTask=Запускать SecondDisplay (HolyC) при входе в систему (нужны права администратора)
+ru.AutostartGroup=Автозапуск:
+ru.RunNow=Запустить SecondDisplay (HolyC) сейчас
+ru.UninstallProgram=Удалить {#MyAppName}
+  #endif
+#endif
+
 [Tasks]
-Name: "autostart"; Description: "Запускать SecondDisplay при входе в систему (нужны права администратора)"; GroupDescription: "Автозапуск:"; Flags: checkedonce
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "autostart"; Description: "{cm:AutostartTask}"; GroupDescription: "{cm:AutostartGroup}"; Flags: checkedonce
 
 [Files]
-; Host publish output (exe + deps + runtimes).
+; Host executable and aliases
 Source: "{#SourceDir}\host\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Bundled adb so the installed host (and this installer) do not depend on the user's PATH.
+; Bundled platform-tools (adb + dlls)
 Source: "{#SourceDir}\platform-tools\*"; DestDir: "{app}\platform-tools"; Flags: ignoreversion
-; Android client to push to the tablet.
+; Android client APK
 Source: "{#SourceDir}\android\*"; DestDir: "{app}"; Flags: ignoreversion
-; Post-install / uninstall helper.
+; Setup helper script
 Source: "{#SourceDir}\seconddisplay-setup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\SecondDisplay (вручную, зеркало)"; Filename: "{app}\SecondDisplay.Host.exe"; Parameters: "--fps 30"; WorkingDir: "{app}"
-Name: "{group}\Удалить {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#HostExeName}"; WorkingDir: "{app}"
+Name: "{group}\{cm:UninstallProgram}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#HostExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-; Register the autostart task + push the APK. Done in [Code] so we can react to the result.
-Filename: "{app}\SecondDisplay.Host.exe"; Description: "Запустить SecondDisplay сейчас"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\{#HostExeName}"; Description: "{cm:RunNow}"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\seconddisplay-setup.ps1"" -AppDir ""{app}"" -UnregisterTask"; Flags: runhidden waituntilterminated; RunOnceId: "UnregTask"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\seconddisplay-setup.ps1"" -AppDir ""{app}"" -ExeName ""{#HostExeName}"" -TaskName ""{#TaskName}"" -UnregisterTask"; Flags: runhidden waituntilterminated; RunOnceId: "UnregTask"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\platform-tools"
@@ -102,7 +124,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\seconddisplay-setup.ps1') +
-              '" -AppDir "' + ExpandConstant('{app}') + '"';
+              '" -AppDir "' + ExpandConstant('{app}') + '" -ExeName "{#HostExeName}" -TaskName "{#TaskName}"';
     if WizardIsTaskSelected('autostart') then
       Params := Params + ' -RegisterTask';
     Params := Params + ' -PushApk';

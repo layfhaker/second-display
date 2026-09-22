@@ -1,6 +1,6 @@
 # SecondDisplay host — Rust rewrite (`host-rs`)
 
-A parallel, from-scratch port of the C# host (`../host/SecondDisplay.Host`) to Rust.
+A parallel, from-scratch port of the C# host (`../host-c#/SecondDisplay.Host`) to Rust.
 Both live side by side: the **C# host stays the shipped/reference build**, this one is the Rust
 branch and the two will keep existing together.
 

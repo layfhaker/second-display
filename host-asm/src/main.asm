@@ -33,6 +33,11 @@ SOCK_STREAM            equ 1
 IPPROTO_TCP            equ 6
 SOL_SOCKET             equ 0FFFFh
 SO_REUSEADDR           equ 4
+SO_RCVTIMEO            equ 1006h
+SO_SNDTIMEO            equ 1005h
+FIONBIO_CMD            equ 8004667Eh
+WSAEWOULDBLOCK         equ 2733
+ADB_PORT               equ 5037
 
 ; ---- wire protocol ----
 PKT_HELLO              equ 01h
@@ -62,6 +67,16 @@ EXTERN GetLastError:PROC
 EXTERN Sleep:PROC
 EXTERN QueryPerformanceCounter:PROC
 EXTERN QueryPerformanceFrequency:PROC
+EXTERN CreateThread:PROC
+EXTERN GetCursorPos:PROC
+EXTERN SendInput:PROC
+EXTERN GetSystemMetrics:PROC
+EXTERN OpenDesktopA:PROC
+EXTERN SetThreadDesktop:PROC
+EXTERN GetModuleFileNameA:PROC
+EXTERN GetFileAttributesA:PROC
+EXTERN EnumDisplayDevicesA:PROC
+EXTERN ChangeDisplaySettingsExA:PROC
 
 ; ---- winsock imports (ws2_32) ----
 EXTERN WSAStartup:PROC
@@ -77,6 +92,8 @@ EXTERN recv:PROC
 EXTERN send:PROC
 EXTERN closesocket:PROC
 EXTERN shutdown:PROC
+EXTERN ioctlsocket:PROC
+EXTERN connect:PROC
 
 ; ---- COM imports (ole32 / dxgi) ----
 EXTERN CoInitializeEx:PROC
@@ -93,7 +110,19 @@ EXTERN MFCreateSample:PROC
 EXTERN MFCreateMemoryBuffer:PROC
 EXTERN CoTaskMemFree:PROC
 
+; ---- GDI imports (gdi32) ----
+EXTERN CreateDCA:PROC
+EXTERN CreateCompatibleDC:PROC
+EXTERN CreateDIBSection:PROC
+EXTERN SelectObject:PROC
+EXTERN BitBlt:PROC
+EXTERN DeleteDC:PROC
+EXTERN DeleteObject:PROC
+
 .data
+szDisp6   db "\\.\DISPLAY6", 0
+szDispDef db "DISPLAY", 0
+szDefaultDesk db "Default", 0
 szLocal   db "LOCALAPPDATA", 0
 szSub     db "\SecondDisplay", 0
 szLog     db "\host-asm.log", 0
@@ -103,6 +132,32 @@ szAdbTail db "adb devices:", 13, 10, 0
 szAdbTail_len equ $ - szAdbTail - 1
 szCrLf    db 13, 10, 0
 szAdbCmd  db "adb.exe devices", 0
+szAdbRev  db "adb.exe reverse tcp:27315 tcp:27315", 0
+szAdbRevTail db "adb reverse:", 13, 10, 0
+szAdbRevTail_len equ $ - szAdbRevTail - 1
+szVddEnable  db "pnputil.exe /enable-device ""ROOT\DISPLAY\0000""", 0
+szVddDisable db "pnputil.exe /disable-device ""ROOT\DISPLAY\0000""", 0
+szPlatTools  db "\platform-tools\adb.exe", 0
+szAdbBare    db "adb.exe devices", 0
+szTailMtt    db "MTT", 0
+szVddPhMsg   db "VDD: removing phantom monitor: ", 0
+szHostDev    db "host:devices", 0
+szHostTrans  db "host:transport:", 0
+szRevFwd     db "reverse:forward:tcp:27315;tcp:27315", 0
+szAmShell    db "shell:am start -n com.seconddisplay.client/.MainActivity", 0
+szOkay       db "OKAY", 0
+szAdbLinkMsg db "adb-link: socket fast path active", 13, 10, 0
+szAdbLinkMsg_len equ $ - szAdbLinkMsg - 1
+szAmStart    db "adb.exe shell am start -n com.seconddisplay.client/.MainActivity", 0
+szVddEnMsg   db "VDD: enabling Virtual Display Driver", 13, 10, 0
+szVddDisMsg  db "VDD: disabling Virtual Display Driver", 13, 10, 0
+fpOne     dd 1.0
+PKT_CURSOR equ 11h
+PKT_TOUCH  equ 20h
+PKT_KEY    equ 22h
+
+include cursor_data.inc
+include key_table.inc
 szCpFail  db "CreateProcessA failed: ", 0
 szPipeFail db "CreatePipe failed", 13, 10, 0
 szExit    db "adb exit=", 0
@@ -135,6 +190,7 @@ szRecvFail db "recv failed wsa=", 0
 szAccept  db "accept() failed wsa=", 0
 
 oneInt    dd 1
+sndBufVal dd 524288
 
 ; IID_IDXGIFactory1 {770AAE78-F26F-4DBA-A829-253C83D1B387}, stored the way COM wants it
 iidFactory1 db 78h,0AEh,0Ah,77h,6Fh,0F2h,0BAh,4Dh,0A8h,29h,25h,3Ch,83h,0D1h,0B3h,87h
@@ -154,7 +210,7 @@ iidOutput1  db 0A8h,0DEh,0CDh,00h,9Bh,93h,83h,4Bh,0A3h,40h,0A6h,85h,22h,66h,66h,
 ; IID_ID3D11Texture2D {6f15aaf2-d208-4e89-9ab4-489535d34f9c}
 iidTexture2D db 0F2h,0AAh,15h,6Fh,08h,0D2h,89h,4Eh,9Ah,0B4h,48h,95h,35h,0D3h,4Fh,9Ch
 
-featureLevels dd 0B000h, 0A100h     ; D3D_FEATURE_LEVEL_11_0, _10_1
+featureLevels dd 0B100h, 0B000h, 0A100h ; D3D_FEATURE_LEVEL_11_1, _11_0, _10_1
 
 szDevFail  db "D3D11CreateDevice failed hr=", 0
 szQiFail   db "QueryInterface(IDXGIOutput1) failed hr=", 0
@@ -288,6 +344,13 @@ br        dd ?
 ec        dd ?
 numBuf    db 16 dup(?)
 
+adbPath   db 260 dup(?)        ; resolved bundled adb path (<exe dir>\platform-tools\adb.exe)
+dispDev   db 164 dup(?)        ; DISPLAY_DEVICEA scratch for phantom scan
+dispMon   db 164 dup(?)        ; nested DISPLAY_DEVICEA for the PnP id
+adbSock   dd ?                 ; one adb-link socket, reused while the server is up
+adbFrame  db 520 dup(?)        ; framed service buffer for adb-link sends
+adbResp   db 4096 dup(?)       ; adb-link response payload scratch
+
 wsaData   db 512 dup(?)        ; WSADATA
 sa2       db 16 dup(?)         ; sockaddr_in
 fdset     db 24 dup(?)         ; fd_set { u_int count; SOCKET fd_array[] }
@@ -380,6 +443,8 @@ sentBytes dd ?
 ; ---- per-stage timing for the live loop (performance-counter ticks) ----
 qpcFreq   dq ?                 ; ticks per second, measured once before the live loop
 qpcTmp    dq ?                 ; scratch for QueryPerformanceCounter
+qpcStart  dq ?                 ; session start timestamp (QPC ticks)
+qpcNow    dq ?                 ; current QPC timestamp
 tMark     dq ?                 ; stage start, written by mark_start
 accPtr    dq ?                 ; accumulator that the current mark_acc adds to
 accAcquire dq ?                ; AcquireNextFrame + QI of the desktop texture
@@ -404,8 +469,71 @@ capW      dd ?
 capH      dd ?
 rowPitch  dd ?
 checksum  dd ?
+originX   dd ?
+originY   dd ?
+curPt     dd 2 dup(?)
+curPkt    db 32 dup(?)
+touchInput db 40 dup(?)
+keyInput   db 40 dup(?)
+inputThreadH dq ?
+inputHdr   db 5 dup(?)
+inputPay   db 1024 dup(?)
+sampleTimeHns dq ?
+encNeedInput  dd ?
+gotFrame      dd ?
 
 .code
+
+; ---------------------------------------------------------------------------
+; send_all — reliable socket send loop until all r8d bytes are transmitted.
+; rcx = socket, rdx = buffer pointer, r8d = byte count
+; Returns eax = 0 on success, 1 on failure
+; ---------------------------------------------------------------------------
+send_all proc
+    push    rbx
+    push    r12
+    push    r13
+    sub     rsp, 20h
+
+    mov     ebx, ecx                       ; socket
+    mov     r12, rdx                       ; buffer pointer
+    mov     r13d, r8d                      ; remaining bytes
+
+sa_loop:
+    test    r13d, r13d
+    jle     sa_ok
+
+    mov     ecx, ebx
+    mov     rdx, r12
+    mov     r8d, r13d
+    xor     r9d, r9d
+    call    send
+    cmp     eax, 0
+    jle     sa_fail
+
+    add     r12, rax
+    sub     r13d, eax
+    jmp     sa_loop
+
+sa_ok:
+    xor     eax, eax
+    add     rsp, 20h
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+sa_fail:
+    mov     eax, 1
+    add     rsp, 20h
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+send_all endp
+
+include input_impl.inc
+include gdi_capture.inc
 
 ; Copy a NUL-terminated string: rcx = dest, rdx = src. Returns rax = dest end (at the NUL).
 copy_z proc
@@ -562,9 +690,660 @@ emit_num proc
     ret
 emit_num endp
 
-; Run "adb devices", capture its stdout through a pipe and emit it. No arguments.
-run_adb_devices proc
-    sub     rsp, 58h               ; shadow + args 5..10 for CreateProcessA
+; Resolve the bundled adb (<exe dir>\platform-tools\adb.exe) into adbPath.
+; Falls back to plain "adb.exe" on PATH when the bundled copy is missing.
+resolve_adb_path proc
+    sub     rsp, 28h
+    mov     byte ptr [adbPath], 0
+    xor     ecx, ecx
+    lea     rdx, adbPath
+    mov     r8d, 260
+    call    GetModuleFileNameA
+    test    eax, eax
+    jz      adb_fallback
+    cmp     eax, 260
+    jae     adb_fallback
+    ; walk back to the last backslash
+    lea     rcx, adbPath
+    add     rcx, rax
+adb_trim:
+    lea     r8, adbPath
+    cmp     rcx, r8
+    jbe     adb_fallback
+    dec     rcx
+    cmp     byte ptr [rcx], '\'
+    jne     adb_trim
+    inc     rcx                 ; keep the trailing backslash, append the tail
+    lea     rdx, szPlatTools+1  ; skip leading '\' -> "platform-tools\adb.exe"
+    call    copy_z
+    ; bundled copy present?
+    lea     rcx, adbPath
+    xor     edx, edx
+    dec     edx                       ; edx = 0FFFFFFFFh without a huge literal
+    call    GetFileAttributesA
+    inc     eax                       ; INVALID (-1) -> 0, anything else -> nonzero
+    jnz     adb_ok
+adb_fallback:
+    lea     rcx, adbPath
+    lea     rdx, szAdbBare
+    call    copy_z
+adb_ok:
+    add     rsp, 28h
+    ret
+resolve_adb_path endp
+
+; Remove MTT phantom monitors from the display topology (ChangeDisplaySettingsEx DETACH),
+; like the C#/Rust RemoveVddMonitors. pnputil disable alone leaves the ghost on screen.
+detach_vdd_monitors proc
+    sub     rsp, 38h
+    mov     dword ptr [rsp+20h], 0      ; display index
+detach_next:
+    cmp     dword ptr [rsp+20h], 16
+    jae     detach_done
+    lea     rcx, dispDev
+    mov     r8, 164
+detach_zero_dev:
+    dec     r8
+    mov     byte ptr [rcx+r8], 0
+    test    r8, r8
+    jnz     detach_zero_dev
+    mov     dword ptr [dispDev], 164
+    xor     ecx, ecx
+    mov     edx, dword ptr [rsp+20h]
+    lea     r8, dispDev
+    xor     r9d, r9d
+    call    EnumDisplayDevicesA
+    test    eax, eax
+    jz      detach_advance
+    lea     rcx, dispMon
+    mov     r8, 164
+detach_zero_mon:
+    dec     r8
+    mov     byte ptr [rcx+r8], 0
+    test    r8, r8
+    jnz     detach_zero_mon
+    mov     dword ptr [dispMon], 164
+    lea     rcx, dispDev+4
+    xor     edx, edx
+    lea     r8, dispMon
+    xor     r9d, r9d
+    call    EnumDisplayDevicesA
+    test    eax, eax
+    jz      detach_advance
+    ; DeviceID lives at mon+136 (cb + name + string + flags); check for "MTT"
+    lea     rsi, dispMon+136
+    lea     rdi, szTailMtt
+    mov     rcx, 3
+    repe    cmpsb
+    jne     detach_advance
+    lea     rcx, szVddPhMsg
+    call    emit_z
+    lea     rcx, dispDev+4
+    call    emit_z
+    lea     rcx, szCrLf
+    call    emit_z
+    lea     rcx, dispDev+4
+    xor     edx, edx
+    xor     r8d, r8d
+    mov     r9d, 8                      ; CDS_DETACH
+    mov     qword ptr [rsp+20h+8], 0
+    mov     dword ptr [rsp+20h], 0
+    push    0
+    sub     rsp, 20h
+    call    ChangeDisplaySettingsExA
+    add     rsp, 28h
+    mov     dword ptr [rsp+20h], 0
+    jmp     detach_advance2
+detach_advance:
+    inc     dword ptr [rsp+20h]
+    jmp     detach_next
+detach_advance2:
+    inc     dword ptr [rsp+20h]
+    jmp     detach_next
+detach_done:
+    mov     ecx, 100
+    call    Sleep
+    add     rsp, 38h
+    ret
+detach_vdd_monitors endp
+
+; Fire-and-forget hidden process (no pipe, no console flash):
+; rcx = command string. Uses adbPath when the command starts with "adb" or "pnputil".
+run_hidden proc
+    push    rbx
+    sub     rsp, 70h
+    mov     rbx, rcx
+    ; zero STARTUPINFOA
+    lea     rcx, siBuf
+    mov     r8, 104
+hidden_zero:
+    dec     r8
+    mov     byte ptr [rcx+r8], 0
+    test    r8, r8
+    jnz     hidden_zero
+    mov     r14, offset siBuf
+    mov     dword ptr [r14], 104
+    mov     dword ptr [r14+60], STARTF_USESTDHANDLES + 1  ; USESTDHANDLES|USESHOWWINDOW
+    mov     word ptr [r14+68], 0        ; wShowWindow = SW_HIDE
+    ; if command starts with 'a' ("adb...") or 'p' ("pnputil..."), prefix bundled adb dir
+    mov     al, byte ptr [rbx]
+    cmp     al, 'a'
+    je      hidden_use_adb
+    cmp     al, 'p'
+    jne     hidden_direct
+hidden_use_adb:
+    lea     rcx, outBuf
+    lea     rdx, adbPath
+    call    copy_z                      ; rax = end of adb path
+    mov     byte ptr [rax], ' '
+    inc     rax
+    mov     rcx, rax
+    mov     rdx, rbx
+    ; skip the bare exe name ("adb.exe " or "pnputil.exe " -> past first space)
+hidden_skip:
+    mov     al, byte ptr [rdx]
+    test    al, al
+    jz      hidden_tail_empty
+    inc     rdx
+    cmp     al, ' '
+    jne     hidden_skip
+    call    copy_z
+    lea     rbx, outBuf
+    jmp     hidden_spawn
+hidden_tail_empty:
+    mov     byte ptr [rcx], 0
+    lea     rbx, outBuf
+    jmp     hidden_spawn
+hidden_direct:
+    ; use the command as-is (already a full path or internal)
+hidden_spawn:
+    xor     ecx, ecx
+    mov     rdx, rbx
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     qword ptr [rsp+20h], 0
+    mov     dword ptr [rsp+28h], CREATE_NO_WINDOW
+    mov     qword ptr [rsp+30h], 0
+    mov     qword ptr [rsp+38h], 0
+    lea     rax, siBuf
+    mov     qword ptr [rsp+40h], rax
+    lea     rax, piBuf
+    mov     qword ptr [rsp+48h], rax
+    call    CreateProcessA
+    test    eax, eax
+    jz      hidden_done
+    mov     rcx, qword ptr [piBuf]
+    call    CloseHandle
+    mov     rcx, qword ptr [piBuf+8]
+    call    CloseHandle
+hidden_done:
+    add     rsp, 70h
+    pop     rbx
+    ret
+run_hidden endp
+
+; ---------------------------------------------------------------------------
+; adb-link: direct socket fast path to the adb server (127.0.0.1:5037).
+; Same framing adb.exe uses (hex4 len + payload, OKAY/FAIL). Every op returns
+; eax = 0 on success and nonzero on any failure, so callers fall back to adb.exe.
+; ---------------------------------------------------------------------------
+
+; strlen: rcx = NUL-terminated string. Returns rax = length.
+adb_strlen proc
+    xor     eax, eax
+strlen_loop:
+    cmp     byte ptr [rcx+rax], 0
+    je      strlen_done
+    inc     rax
+    jmp     strlen_loop
+strlen_done:
+    ret
+adb_strlen endp
+
+; adb_link_connect: open a blocking TCP socket to 127.0.0.1:5037 with a ~1.5s
+; connect timeout. Returns eax = socket, or -1.
+adb_link_connect proc
+    sub     rsp, 58h
+    mov     ecx, AF_INET
+    mov     edx, SOCK_STREAM
+    mov     r8d, IPPROTO_TCP
+    call    socket
+    cmp     eax, -1
+    je      alc_fail
+    mov     ebx, eax
+    ; send/recv timeouts 3s
+    mov     dword ptr [rsp+20h], 3000
+    mov     ecx, ebx
+    mov     edx, SOL_SOCKET
+    mov     r8d, SO_RCVTIMEO
+    lea     r9, [rsp+20h]
+    mov     dword ptr [rsp+40h], 4
+    call    setsockopt
+    mov     ecx, ebx
+    mov     edx, SOL_SOCKET
+    mov     r8d, SO_SNDTIMEO
+    lea     r9, [rsp+20h]
+    mov     dword ptr [rsp+40h], 4
+    call    setsockopt
+    ; sockaddr 127.0.0.1:5037
+    mov     word ptr [rsp+20h], AF_INET
+    mov     eax, ADB_PORT
+    xchg    al, ah
+    mov     word ptr [rsp+22h], ax
+    mov     dword ptr [rsp+24h], 0100007Fh
+    mov     qword ptr [rsp+28h], 0
+    ; non-blocking connect with select timeout
+    mov     dword ptr [rsp+30h], 1
+    mov     ecx, ebx
+    mov     edx, FIONBIO_CMD
+    lea     r8, [rsp+30h]
+    call    ioctlsocket
+    mov     ecx, ebx
+    lea     rdx, [rsp+20h]
+    mov     r8d, 16
+    call    connect
+    test    eax, eax
+    jz      alc_block
+    call    WSAGetLastError
+    cmp     eax, WSAEWOULDBLOCK
+    jne     alc_close
+    ; select writable, 1.5s
+    mov     dword ptr [rsp+30h], 1
+    mov     qword ptr [rsp+38h], rbx
+    mov     dword ptr [rsp+40h], 1
+    mov     dword ptr [rsp+44h], 500000
+    xor     ecx, ecx
+    xor     edx, edx
+    lea     r8, [rsp+30h]
+    xor     r9d, r9d
+    lea     rax, [rsp+40h]
+    mov     qword ptr [rsp+20h], rax
+    call    select
+    test    eax, eax
+    jle     alc_close
+alc_block:
+    mov     dword ptr [rsp+30h], 0
+    mov     ecx, ebx
+    mov     edx, FIONBIO_CMD
+    lea     r8, [rsp+30h]
+    call    ioctlsocket
+    mov     eax, ebx
+    add     rsp, 58h
+    ret
+alc_close:
+    mov     ecx, ebx
+    call    closesocket
+alc_fail:
+    mov     eax, -1
+    add     rsp, 58h
+    ret
+adb_link_connect endp
+
+; adb_link_send: rcx = socket, rdx = service string (NUL-terminated, <= 512).
+; Sends hex4 + payload. eax = 0 ok, 1 fail.
+adb_link_send proc
+    push    rbx
+    push    rsi
+    push    rdi
+    sub     rsp, 20h
+    mov     ebx, ecx
+    mov     rsi, rdx
+    mov     rcx, rsi
+    call    adb_strlen
+    cmp     rax, 512
+    ja      als_fail
+    test    rax, rax
+    jz      als_fail
+    mov     rdi, rax
+    ; hex length into adbFrame[0..3]
+    lea     rcx, adbFrame
+    mov     r8, rax
+    mov     edx, 4
+als_hex:
+    dec     edx
+    mov     r9, r8
+    and     r9, 15
+    cmp     r9d, 10
+    jb      als_dig
+    add     r9d, 'a'-10
+    jmp     als_sto
+als_dig:
+    add     r9d, '0'
+als_sto:
+    mov     byte ptr [rcx+rdx], r9b
+    shr     r8, 4
+    test    edx, edx
+    jnz     als_hex
+    ; copy payload
+    lea     rcx, [adbFrame+4]
+    mov     rdx, rsi
+    call    copy_z
+    add     rdi, 4
+    lea     rsi, adbFrame
+als_loop:
+    test    rdi, rdi
+    jle     als_ok
+    mov     ecx, ebx
+    mov     rdx, rsi
+    mov     r8d, edi
+    cmp     r8d, edi
+    jne     als_chunk
+    mov     r8d, edi
+als_chunk:
+    xor     r9d, r9d
+    call    send
+    cmp     eax, 0
+    jle     als_fail
+    add     rsi, rax
+    sub     rdi, rax
+    jmp     als_loop
+als_ok:
+    xor     eax, eax
+    add     rsp, 20h
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+als_fail:
+    mov     eax, 1
+    add     rsp, 20h
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+adb_link_send endp
+
+; adb_link_recv_all: rcx = socket, rdx = buffer, r8d = count. eax = 0 ok, 1 fail.
+adb_link_recv_all proc
+    push    rbx
+    push    rsi
+    push    rdi
+    mov     ebx, ecx
+    mov     rsi, rdx
+    mov     edi, r8d
+    test    edi, edi
+    jz      alr_ok
+alr_loop:
+    mov     ecx, ebx
+    mov     rdx, rsi
+    mov     r8d, edi
+    xor     r9d, r9d
+    call    recv
+    cmp     eax, 0
+    jle     alr_fail
+    add     rsi, rax
+    sub     edi, eax
+    jnz     alr_loop
+alr_ok:
+    xor     eax, eax
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+alr_fail:
+    mov     eax, 1
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+adb_link_recv_all endp
+
+; adb_link_query: rdx = service string, r8 = out buffer, r9d = out cap.
+; Single-shot host service. Returns eax = payload length, or -1.
+adb_link_query proc
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    sub     rsp, 40h
+    mov     rsi, rdx
+    mov     r12, r8
+    mov     r13d, r9d
+    call    adb_link_connect
+    cmp     eax, -1
+    je      alq_fail
+    mov     ebx, eax
+    mov     ecx, ebx
+    mov     rdx, rsi
+    call    adb_link_send
+    test    eax, eax
+    jnz     alq_close
+    mov     ecx, ebx
+    lea     rdx, [rsp+20h]
+    mov     r8d, 4
+    call    adb_link_recv_all
+    test    eax, eax
+    jnz     alq_close
+    cmp     dword ptr [rsp+20h], 59414B4Fh   ; "OKAY" little-endian
+    jne     alq_close
+    mov     ecx, ebx
+    lea     rdx, [rsp+24h]
+    mov     r8d, 4
+    call    adb_link_recv_all
+    test    eax, eax
+    jnz     alq_close
+    ; hex length
+    xor     edi, edi
+    mov     ecx, 4
+    lea     rsi, [rsp+24h]
+alq_hex:
+    movzx   eax, byte ptr [rsi]
+    inc     rsi
+    cmp     al, '0'
+    jb      alq_close
+    cmp     al, '9'
+    jbe     alq_d
+    cmp     al, 'a'
+    jb      alq_close
+    cmp     al, 'f'
+    ja      alq_close
+    sub     al, 'a'-10-'0'
+alq_d:
+    sub     al, '0'
+    shl     edi, 4
+    or      edi, eax
+    dec     ecx
+    jnz     alq_hex
+    cmp     edi, r13d
+    cmova   edi, r13d
+    test    edi, edi
+    jz      alq_empty
+    mov     ecx, ebx
+    mov     rdx, r12
+    mov     r8d, edi
+    call    adb_link_recv_all
+    test    eax, eax
+    jnz     alq_close
+alq_empty:
+    mov     ecx, ebx
+    call    closesocket
+    mov     eax, edi
+    add     rsp, 40h
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+alq_close:
+    mov     ecx, ebx
+    call    closesocket
+alq_fail:
+    mov     eax, -1
+    add     rsp, 40h
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+adb_link_query endp
+
+; adb_link_transport: rcx = serial string, rdx = local service, r8 = out buffer,
+; r9d = out cap. Two-step host:transport + local service, streams output until EOF.
+; Returns eax = byte count, or -1.
+adb_link_transport proc
+    push    rbx
+    push    rsi
+    push    rdi
+    push    r12
+    push    r13
+    push    r14
+    sub     rsp, 60h
+    mov     r12, rcx              ; serial
+    mov     r13, rdx              ; local service
+    mov     r14, r8               ; out buffer
+    mov     dword ptr [rsp+20h], r9d  ; out cap
+    call    adb_link_connect
+    cmp     eax, -1
+    je      alt_fail
+    mov     ebx, eax
+    ; build "host:transport:<serial>" in adbFrame via outBuf scratch
+    lea     rcx, outBuf
+    lea     rdx, szHostTrans
+    call    copy_z
+    mov     rcx, rax
+    mov     rdx, r12
+    call    copy_z
+    mov     ecx, ebx
+    lea     rdx, outBuf
+    call    adb_link_send
+    test    eax, eax
+    jnz     alt_close
+    mov     ecx, ebx
+    lea     rdx, [rsp+28h]
+    mov     r8d, 4
+    call    adb_link_recv_all
+    test    eax, eax
+    jnz     alt_close
+    cmp     dword ptr [rsp+28h], 59414B4Fh
+    jne     alt_close
+    mov     ecx, ebx
+    mov     rdx, r13
+    call    adb_link_send
+    test    eax, eax
+    jnz     alt_close
+    mov     ecx, ebx
+    lea     rdx, [rsp+28h]
+    mov     r8d, 4
+    call    adb_link_recv_all
+    test    eax, eax
+    jnz     alt_close
+    cmp     dword ptr [rsp+28h], 59414B4Fh
+    jne     alt_close
+    ; stream until EOF
+    xor     edi, edi
+alt_stream:
+    mov     eax, dword ptr [rsp+20h]
+    sub     eax, edi
+    jle     alt_stream_done
+    cmp     eax, 4096
+    cmova   eax, dword ptr [rsp+20h]
+    mov     ecx, ebx
+    mov     rdx, r14
+    add     rdx, rdi
+    mov     r8d, eax
+    cmp     eax, 4096
+    cmova   r8d, dword ptr [rsp+20h]
+    mov     r8d, eax
+    cmp     r8d, 4096
+    jbe     alt_recv
+    mov     r8d, 4096
+alt_recv:
+    xor     r9d, r9d
+    call    recv
+    cmp     eax, 0
+    jle     alt_stream_done
+    add     rdi, rax
+    jmp     alt_stream
+alt_stream_done:
+    mov     ecx, ebx
+    call    closesocket
+    mov     eax, edi
+    add     rsp, 60h
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+alt_close:
+    mov     ecx, ebx
+    call    closesocket
+alt_fail:
+    mov     eax, -1
+    add     rsp, 60h
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rdi
+    pop     rsi
+    pop     rbx
+    ret
+adb_link_transport endp
+
+; adb_link_has_device: socket host:devices, scan for "<serial>\tdevice".
+; Returns eax = 1 when any device is in "device" state, else 0.
+adb_link_has_device proc
+    sub     rsp, 28h
+    lea     rdx, szHostDev
+    lea     r8, adbResp
+    mov     r9d, 4096
+    call    adb_link_query
+    cmp     eax, 0
+    jle     alh_no
+    mov     ecx, eax
+    lea     rsi, adbResp
+    xor     edx, edx
+alh_scan:
+    cmp     edx, ecx
+    jae     alh_no
+    cmp     byte ptr [rsi+rdx], 9   ; tab
+    jne     alh_next
+    ; state starts after tab: "device" followed by \r, \n or end
+    cmp     byte ptr [rsi+rdx+1], 'd'
+    jne     alh_next
+    cmp     byte ptr [rsi+rdx+2], 'e'
+    jne     alh_next
+    cmp     byte ptr [rsi+rdx+3], 'v'
+    jne     alh_next
+    cmp     byte ptr [rsi+rdx+4], 'i'
+    jne     alh_next
+    cmp     byte ptr [rsi+rdx+5], 'c'
+    jne     alh_next
+    cmp     byte ptr [rsi+rdx+6], 'e'
+    jne     alh_next
+    mov     r8b, byte ptr [rsi+rdx+7]
+    cmp     r8b, 13
+    je      alh_yes
+    cmp     r8b, 10
+    je      alh_yes
+    cmp     r8b, 0
+    je      alh_yes
+    cmp     r8b, ' '
+    je      alh_yes
+    cmp     r8b, 9
+    je      alh_yes
+alh_next:
+    inc     edx
+    jmp     alh_scan
+alh_yes:
+    mov     eax, 1
+    add     rsp, 28h
+    ret
+alh_no:
+    xor     eax, eax
+    add     rsp, 28h
+    ret
+adb_link_has_device endp
+
+; Run an adb command string in rcx, capture its stdout through a pipe and emit it.
+run_adb_cmd proc
+    push    rbx
+    sub     rsp, 50h
+    mov     rbx, rcx
 
     ; ---- CreatePipe(&readH, &writeH, NULL, 0) ----
     lea     rcx, readH
@@ -595,7 +1374,7 @@ adb_pipe_ok:
 
     ; ---- CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi) ----
     xor     ecx, ecx
-    lea     rdx, szAdbCmd
+    mov     rdx, rbx
     xor     r8d, r8d
     xor     r9d, r9d
     mov     qword ptr [rsp+20h], 1
@@ -668,9 +1447,67 @@ adb_close:
     call    CloseHandle
 
 adb_done:
-    add     rsp, 58h
+    add     rsp, 50h
+    pop     rbx
+    ret
+run_adb_cmd endp
+
+run_adb_devices proc
+    sub     rsp, 28h
+    ; socket fast path first: one ~2ms round-trip, zero spawns
+    call    adb_link_has_device
+    test    eax, eax
+    jnz     adb_dev_fast
+    lea     rcx, szAdbTail
+    mov     edx, szAdbTail_len
+    call    emit
+    call    run_adb_cmd_fallback
+    jmp     adb_dev_rev
+adb_dev_fast:
+    lea     rcx, szAdbLinkMsg
+    mov     edx, szAdbLinkMsg_len
+    call    emit
+adb_dev_rev:
+    lea     rcx, szAdbRevTail
+    mov     edx, szAdbRevTail_len
+    call    emit
+    lea     rcx, szAdbRev
+    call    run_hidden
+    add     rsp, 28h
     ret
 run_adb_devices endp
+
+run_adb_cmd_fallback proc
+    sub     rsp, 28h
+    lea     rcx, szAdbCmd
+    call    run_adb_cmd
+    add     rsp, 28h
+    ret
+run_adb_cmd_fallback endp
+
+enable_vdd proc
+    sub     rsp, 28h
+    lea     rcx, szVddEnMsg
+    call    emit_z
+    lea     rcx, szVddEnable
+    call    run_hidden
+    call    detach_vdd_monitors
+    lea     rcx, szAmStart
+    call    run_hidden
+    add     rsp, 28h
+    ret
+enable_vdd endp
+
+disable_vdd proc
+    sub     rsp, 28h
+    lea     rcx, szVddDisMsg
+    call    emit_z
+    call    detach_vdd_monitors
+    lea     rcx, szVddDisable
+    call    run_hidden
+    add     rsp, 28h
+    ret
+disable_vdd endp
 
 ; TCP self-test: listen on 0.0.0.0:27315, accept one client within 15s, decode its packet,
 ; answer a HELLO with READY. Mirrors the real handshake in host-rs/src/protocol.rs.
@@ -752,11 +1589,12 @@ bind_ok:
     lea     rcx, szListenOk
     call    emit_z
 
-    ; ---- select(0, &fdset{sockListen}, NULL, NULL, &timeval{15s}) ----
+    ; ---- select loop waiting for client connection ----
+wait_client_loop:
     mov     dword ptr [fdset], 1
     mov     eax, sockListen
     mov     qword ptr [fdset+8], rax
-    mov     dword ptr [tv], 15
+    mov     dword ptr [tv], 1
     mov     dword ptr [tv+4], 0
     xor     ecx, ecx
     lea     rdx, fdset
@@ -767,8 +1605,11 @@ bind_ok:
     call    select
     test    eax, eax
     jg      have_client
-    lea     rcx, szNoClient
-    call    emit_z
+    jz      wait_client_loop
+    call    WSAGetLastError
+    mov     edx, eax
+    lea     rcx, szSockFail
+    call    emit_num
     jmp     close_listen
 
 have_client:
@@ -785,6 +1626,21 @@ have_client:
     jmp     close_listen
 accepted:
     mov     sockClient, eax
+    mov     qword ptr [qpcStart], 0
+    mov     dword ptr [encNeedInput], 1
+    mov     dword ptr [gotFrame], 0
+    mov     ecx, sockClient
+    mov     edx, 6                         ; IPPROTO_TCP
+    mov     r8d, 1                         ; TCP_NODELAY
+    lea     r9, oneInt
+    mov     dword ptr [rsp+20h], 4
+    call    setsockopt
+    mov     ecx, sockClient
+    mov     edx, 0FFFFh                    ; SOL_SOCKET
+    mov     r8d, 1001h                     ; SO_SNDBUF
+    lea     r9, sndBufVal
+    mov     dword ptr [rsp+20h], 4
+    call    setsockopt
     lea     rcx, szClient
     call    emit_z
 
@@ -861,6 +1717,17 @@ send_ready:
     mov     streamSock, eax
     lea     rcx, szStreamKeep
     call    emit_z
+
+    ; ---- launch input thread to receive touch and keyboard events ----
+    xor     ecx, ecx
+    xor     edx, edx
+    lea     r8, input_thread_proc
+    xor     r9d, r9d
+    mov     qword ptr [rsp+20h], 0
+    mov     qword ptr [rsp+28h], 0
+    call    CreateThread
+    mov     inputThreadH, rax
+
     jmp     tcp_done                       ; do not close it, do not WSACleanup under it
 
 close_client:
@@ -910,28 +1777,20 @@ send_video_frame proc
     mov     ecx, streamSock
     lea     rdx, pktOut
     mov     r8d, 14
-    xor     r9d, r9d
-    call    send
-    cmp     eax, 14
-    jne     svf_fail
+    call    send_all
+    test    eax, eax
+    jnz     svf_fail
 
     mov     ecx, streamSock
     mov     rdx, qword ptr [sendPtr]
     mov     r8d, sendLen
-    xor     r9d, r9d
-    call    send
-    cmp     eax, sendLen
-    jne     svf_fail
+    call    send_all
+    test    eax, eax
+    jnz     svf_fail
 
     inc     sentFrames
     mov     eax, sendLen
     add     sentBytes, eax
-    lea     rcx, szSentBytes
-    mov     edx, sendLen
-    call    emit_num
-    lea     rcx, szSentKey
-    movzx   edx, byte ptr [pktOut+13]
-    call    emit_num
     jmp     svf_done
 
 svf_fail:
@@ -1046,6 +1905,16 @@ release_previous_capture proc
     mov     rcx, pDevice
     call    rel_if
     mov     qword ptr [pDevice], 0
+    mov     rcx, inputThreadH
+    test    rcx, rcx
+    jz      no_old_in_th
+    mov     edx, 500
+    call    WaitForSingleObject
+    mov     rcx, inputThreadH
+    call    CloseHandle
+    mov     qword ptr [inputThreadH], 0
+no_old_in_th:
+    call    release_gdi_capture
     add     rsp, 28h
     ret
 release_previous_capture endp
@@ -1054,6 +1923,18 @@ run_dxgi_probe proc
     push    r12
     push    r13
     sub     rsp, 68h
+
+    ; ---- Attach thread to interactive "Default" desktop to enable DXGI Desktop Duplication ----
+    lea     rcx, szDefaultDesk
+    xor     edx, edx
+    xor     r8d, r8d
+    mov     r9d, 01FFh             ; DESKTOP_ALL
+    call    OpenDesktopA
+    test    rax, rax
+    jz      @f
+    mov     rcx, rax
+    call    SetThreadDesktop
+@@:
 
     ; NOTE: the capture cannot be released here. The encoder probe runs first and hands the D3D11
     ; device to the MFT, so dropping the device at this point releases it under the live encoder - the
@@ -1237,14 +2118,14 @@ cp_adapt_loop:
     lea     rdx, adapterDesc
     call    qword ptr [rax+64]     ; IDXGIAdapter::GetDesc (we need its LUID below)
 
-    ; ---- D3D11CreateDevice(NULL, HARDWARE, NULL, BGRA_SUPPORT, levels, 1, SDK 7, ...) ----
-    xor     ecx, ecx               ; default adapter, like the Microsoft sample
-    mov     edx, 1                 ; D3D_DRIVER_TYPE_HARDWARE
+    ; ---- D3D11CreateDevice(pAdapter, UNKNOWN, NULL, BGRA_SUPPORT | VIDEO_SUPPORT, levels, 3, SDK 7, ...) ----
+    mov     rcx, pAdapter          ; bind device to this exact adapter
+    xor     edx, edx               ; D3D_DRIVER_TYPE_UNKNOWN = 0 (required when adapter != NULL)
     xor     r8d, r8d
-    mov     r9d, 20h               ; D3D11_CREATE_DEVICE_BGRA_SUPPORT
+    mov     r9d, 820h              ; D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT
     lea     rax, featureLevels
     mov     qword ptr [rsp+20h], rax
-    mov     dword ptr [rsp+28h], 1
+    mov     dword ptr [rsp+28h], 3 ; 3 levels (11_1, 11_0, 10_1)
     mov     dword ptr [rsp+30h], 7 ; D3D11_SDK_VERSION
     lea     rax, pDevice
     mov     qword ptr [rsp+38h], rax
@@ -1375,6 +2256,10 @@ cp_out_loop:
     jne     cp_out_next
     mov     capW, eax
     mov     capH, ecx
+    mov     eax, dword ptr [outDesc+64]
+    mov     originX, eax
+    mov     eax, dword ptr [outDesc+68]
+    mov     originY, eax
 
     ; ---- IDXGIOutput1 (a prerequisite for DuplicateOutput) ----
     mov     rcx, pOutput
@@ -1425,6 +2310,14 @@ cp_have_output1:
     call    emit_num
     lea     rcx, ansiBuf
     call    emit_z
+
+    ; Fallback to GDI capture if DuplicateOutput is denied (e.g. non-elevated session)
+    lea     rcx, ansiBuf
+    mov     edx, capW
+    mov     r8d, capH
+    call    init_gdi_capture
+    test    eax, eax
+    jz      cp_have_dup
     jmp     cp_out_next
 
 cp_have_dup:
@@ -1435,47 +2328,272 @@ cp_have_dup:
     lea     rcx, szCrLf
     call    emit_z
 
+    ; Warmup 5 frames to let desktop compositor initialize
+    mov     r12d, 5
+cgf_warmup:
+    lea     rcx, nv12Frame
+    mov     edx, 20
+    call    wgc_capture_nv12
+    mov     ecx, 16
+    call    Sleep
+    dec     r12d
+    jnz     cgf_warmup
+
 cap_frame_begin:
-    ; ---- AcquireNextFrame(5000, &frameInfo, &resource) ----
+    cmp     dword ptr [useGdi], 0
+    jne     cap_gdi_frame
+
+    ; ---- AcquireNextFrame(16, &frameInfo, &resource) ----
     call    mark_start
     mov     rcx, pDup
     mov     rax, [rcx]
-    mov     edx, 16                        ; a short wait: a static display is the normal case, and a
-                                           ; 5 second timeout throttled the loop to a frame every few
-                                           ; seconds. The timeout path re-feeds the last frame, so the
-                                           ; stream keeps flowing at capture speed either way.
+    mov     edx, 16
     lea     r8, frameInfo
     lea     r9, pRes
     call    qword ptr [rax+64]
     test    eax, eax
     jz      cap_acq_ok
-    ; DXGI_ERROR_WAIT_TIMEOUT (0x887A0027) means the captured display simply has not changed yet. That
-    ; is not a failure: tearing the session down here is what left the app connected with zero frames
-    ; sent while the virtual display sat still. Wait and try again.
     cmp     eax, 887A0027h
     jne     cap_acq_fail
     cmp     dword ptr [haveFrame], 0
     jne     cap_acq_resend
-    ; No frame at all yet and the acquisition keeps timing out: that is a stale duplication. DXGI
-    ; invalidates duplications on mode changes and the display then delivers nothing for this session
-    ; (Rust on the very same display sees ~30 fps, so the frames are there). Waiting longer never helps
-    ; - end the session so the serve loop rebuilds the capture stage and gets a fresh duplication.
-    inc     dword ptr [acqTimeouts]
-    cmp     dword ptr [acqTimeouts], 3
-    jae     cap_frame_done
+    cmp     dword ptr [streamSock], 0
+    je      cap_frame_done
+    call    send_cursor_packet
     jmp     cap_acq_wait
 cap_acq_resend:
-    ; A still desktop must not silence the stream: re-feed the frame we already hold in nv12Frame.
-    ; Do it at the declared frame rate and not on every timeout - each feed allocates a fresh NV12
-    ; buffer, and re-feeding as fast as the loop spins is what kept the memory climbing.
+    call    send_cursor_packet
     inc     dword ptr [resendTick]
     test    dword ptr [resendTick], 1
     jnz     cap_acq_wait
     call    run_encoder_loop
 cap_acq_wait:
+    cmp     dword ptr [streamSock], 0
+    je      cap_frame_done
     mov     ecx, 5
     call    Sleep
     jmp     cap_frame_begin
+
+poll_encoder_events proc
+    push    r12
+    sub     rsp, 30h
+
+    mov     rcx, pEventGen
+    test    rcx, rcx
+    jnz     pee_loop
+    mov     dword ptr [encNeedInput], 1
+    jmp     pee_ok
+
+pee_loop:
+    mov     rcx, pEventGen
+    mov     rax, [rcx]
+    mov     edx, 1                         ; MF_EVENT_FLAG_NO_WAIT
+    lea     r8, pEvent
+    call    qword ptr [rax+24]             ; GetEvent
+    test    eax, eax
+    jz      pee_got_event
+    cmp     eax, 0C00D3E80h                ; MF_E_NO_EVENTS_AVAILABLE
+    je      pee_ok
+    jmp     pee_ok
+
+pee_got_event:
+    mov     dword ptr [evType], 0
+    mov     rcx, pEvent
+    mov     rax, [rcx]
+    lea     rdx, evType
+    call    qword ptr [rax+264]            ; IMFMediaEvent::GetType
+    mov     rcx, pEvent
+    call    rel_if
+    mov     qword ptr [pEvent], 0
+
+    mov     eax, dword ptr [evType]
+    cmp     eax, 601                       ; METransformNeedInput
+    jne     pee_check_output
+    mov     dword ptr [encNeedInput], 1
+    jmp     pee_loop
+
+pee_check_output:
+    cmp     eax, 602                       ; METransformHaveOutput
+    jne     pee_loop
+    call    drain_encoder_output
+    jmp     pee_loop
+
+pee_ok:
+    add     rsp, 30h
+    pop     r12
+    ret
+poll_encoder_events endp
+
+drain_encoder_output proc
+    push    r12
+    sub     rsp, 50h
+
+deo_loop:
+    mov     rcx, pTransform
+    test    rcx, rcx
+    jz      deo_done
+
+    lea     r10, odb
+    mov     qword ptr [r10], 0             ; dwStreamID = 0
+    mov     qword ptr [r10+8], 0           ; pSample = NULL
+    mov     qword ptr [r10+16], 0          ; dwStatus = 0
+    mov     qword ptr [r10+24], 0          ; pEvents = NULL
+    mov     dword ptr [outStatus], 0
+
+    mov     rax, [rcx]
+    xor     edx, edx                       ; dwFlags = 0
+    mov     r8d, 1                         ; cOutputBufferCount = 1
+    lea     r9, odb
+    lea     r10, outStatus
+    mov     qword ptr [rsp+20h], r10
+    call    qword ptr [rax+200]            ; ProcessOutput
+    cmp     eax, 0C00D6D72h                ; MF_E_TRANSFORM_NEED_MORE_INPUT
+    je      deo_done
+    test    eax, eax
+    jnz     deo_done
+
+    mov     r12, qword ptr [odb+8]         ; pSample
+    test    r12, r12
+    jz      deo_done
+
+    ; Query actual PTS from the output sample
+    mov     rcx, r12
+    mov     rax, [rcx]
+    lea     rdx, sampleTimeHns
+    call    qword ptr [rax+280]            ; IMFSample::GetSampleTime
+    test    eax, eax
+    jnz     deo_have_pts
+    mov     rax, qword ptr [sampleTimeHns]
+    mov     qword ptr [hnsPts], rax
+deo_have_pts:
+
+    mov     qword ptr [pContig], 0
+    mov     rcx, r12
+    mov     rax, [rcx]
+    lea     rdx, pContig
+    call    qword ptr [rax+328]            ; IMFSample::ConvertToContiguousBuffer
+    test    eax, eax
+    jnz     deo_release_sample
+
+    mov     rcx, pContig
+    mov     rax, [rcx]
+    lea     rdx, bufPtr
+    lea     r8, bufMax
+    lea     r9, bufCur
+    call    qword ptr [rax+24]             ; Lock
+    test    eax, eax
+    jnz     deo_release_contig
+
+    mov     r11, qword ptr [bufPtr]
+    mov     ecx, dword ptr [bufCur]
+    test    ecx, ecx
+    jz      deo_unlock
+
+    cmp     dword ptr [encFrames], 0
+    jne     deo_not_first
+    mov     firstSize, ecx
+deo_not_first:
+    inc     dword ptr [encFrames]
+    add     dword ptr [encBytes], ecx
+    mov     qword ptr [sendPtr], r11
+    mov     dword ptr [sendLen], ecx
+    call    send_video_frame
+
+deo_unlock:
+    mov     rcx, pContig
+    mov     rax, [rcx]
+    call    qword ptr [rax+32]             ; Unlock
+
+deo_release_contig:
+    mov     rcx, pContig
+    call    rel_if
+    mov     qword ptr [pContig], 0
+
+deo_release_sample:
+    mov     rcx, r12
+    call    rel_if
+    mov     rcx, qword ptr [odb+24]
+    call    rel_if
+    mov     qword ptr [odb+24], 0
+
+    jmp     deo_loop                       ; Drain any additional output buffers!
+
+deo_done:
+    add     rsp, 50h
+    pop     r12
+    ret
+drain_encoder_output endp
+
+cap_gdi_frame:
+    cmp     dword ptr [streamSock], 0
+    je      cap_frame_done
+
+    ; 1. Send cursor position FIRST for instant zero-latency cursor response
+    call    send_cursor_packet
+
+    ; 2. Calculate current monotonic QPC PTS (in 100 ns units)
+    cmp     qword ptr [qpcFreq], 0
+    jne     cgf_have_freq
+    lea     rcx, qpcFreq
+    call    QueryPerformanceFrequency
+cgf_have_freq:
+    lea     rcx, qpcNow
+    call    QueryPerformanceCounter
+    mov     rax, qword ptr [qpcNow]
+    cmp     qword ptr [qpcStart], 0
+    jne     cgf_have_start
+    mov     qword ptr [qpcStart], rax
+cgf_have_start:
+    sub     rax, qword ptr [qpcStart]
+    mov     r8, 1000000
+    mul     r8
+    mov     rcx, qword ptr [qpcFreq]
+    test    rcx, rcx
+    jz      cgf_pts_zero
+    div     rcx
+    imul    rax, 10
+    jmp     cgf_pts_store
+cgf_pts_zero:
+    xor     eax, eax
+cgf_pts_store:
+    mov     qword ptr [hnsPts], rax
+
+    ; 3. Poll encoder events and drain output if available
+    call    poll_encoder_events
+
+    ; 4. Check if encoder needs input
+    mov     dword ptr [gotFrame], 0
+    cmp     dword ptr [encNeedInput], 0
+    je      cgf_drain
+
+    lea     rcx, nv12Frame
+    mov     edx, 20                        ; 20 ms timeout (locks to 60Hz VSync)
+    call    wgc_capture_nv12
+    test    eax, eax
+    jz      cgf_drain
+
+    mov     dword ptr [haveFrame], 1
+    mov     dword ptr [gotFrame], 1
+    mov     dword ptr [encNeedInput], 0
+    mov     rcx, qword ptr [hnsPts]
+    call    feed_nv12_frame
+    inc     dword ptr [accFrames]
+
+cgf_drain:
+    ; 5. Drain any encoded HEVC access units
+    call    drain_encoder_output
+
+    ; 6. Sleep 1 ms only if no frame was captured
+    cmp     dword ptr [gotFrame], 0
+    jne     cgf_check
+    mov     ecx, 1
+    call    Sleep
+
+cgf_check:
+    cmp     dword ptr [streamSock], 0
+    je      cap_frame_done
+    jmp     cap_gdi_frame
+
 cap_acq_ok:
 
     mov     dword ptr [acqTimeouts], 0
@@ -1974,7 +3092,7 @@ cap_frame_live:
     call    cap_release_frame
     jmp     cap_frame_begin
 cap_live_feed:
-
+    call    send_cursor_packet
     cmp     dword ptr [feedToggle], 0
     je      cap_frame_release
     call    mark_start
@@ -2171,6 +3289,8 @@ cap_no_dup:
     call    rel_if
     mov     qword ptr [pFactory], 0
 
+    call    release_gdi_capture
+
     add     rsp, 88h
     pop     r13
     pop     r12
@@ -2240,13 +3360,13 @@ cap_release_frame endp
 
 ; Release a COM interface if the pointer is non-null: rcx = pointer. Clobbers rax/rdx.
 rel_if proc
-    sub     rsp, 8
+    sub     rsp, 28h
     test    rcx, rcx
     jz      rel_if_done
     mov     rax, [rcx]
     call    qword ptr [rax+16]     ; IUnknown::Release
 rel_if_done:
-    add     rsp, 8
+    add     rsp, 28h
     ret
 rel_if endp
 
@@ -2540,9 +3660,7 @@ mf_out_created:
     mov     rcx, pOutType
     mov     rax, [rcx]
     lea     rdx, mfMtAvgBitrate
-    mov     r8d, 1C9C380h                  ; 30 000 000: the rate control sizes its output sample for
-                                           ; the average bitrate at the declared 30 fps, and at the
-                                           ; capture rate we actually feed, 12 Mbps clipped most frames
+    mov     r8d, 01312D00h                 ; 20 000 000 (20 Mbps)
     call    qword ptr [rax+168]            ; SetUINT32(AVG_BITRATE)
     mov     rcx, pOutType
     mov     rax, [rcx]
@@ -2558,7 +3676,7 @@ mf_out_created:
     mov     rcx, pOutType
     mov     rax, [rcx]
     lea     rdx, mfMtFrameRate
-    mov     r8, 1E00000001h                ; 30 << 32 | 1
+    mov     r8, 3C00000001h                ; 60 << 32 | 1
     call    qword ptr [rax+176]            ; SetUINT64(FRAME_RATE)
     mov     rcx, pOutType
     mov     rax, [rcx]
@@ -2615,7 +3733,7 @@ mf_in_created:
     mov     rcx, pInType
     mov     rax, [rcx]
     lea     rdx, mfMtFrameRate
-    mov     r8, 1E00000001h
+    mov     r8, 3C00000001h                ; 60 << 32 | 1
     call    qword ptr [rax+176]
     mov     rcx, pInType
     mov     rax, [rcx]
@@ -2670,6 +3788,15 @@ mf_in_set:
     call    qword ptr [rax+184]
     test    eax, eax
     jnz     mf_msg_fail
+
+    ; Query IMFMediaEventGenerator for event pump
+    mov     rcx, pTransform
+    mov     rax, [rcx]
+    lea     rdx, iidIMFMEGen
+    lea     r8, pEventGen
+    call    qword ptr [rax+0]              ; QI(IMFMediaEventGenerator)
+    mov     dword ptr [encNeedInput], 1
+
     lea     rcx, szMfReady
     call    emit_z
     cmp     dword ptr [liveMode], 0
@@ -2779,20 +3906,6 @@ ff_uv:
     inc     ecx
     jmp     ff_uv
 ff_filled:
-    ; sanity check: prove which frame the encoder actually received. With the real capture this
-    ; must equal the VPP luma checksum printed above; the synthetic fallback gives a different sum.
-    xor     ecx, ecx
-    xor     edx, edx
-ff_sum:
-    cmp     ecx, 2073600
-    jae     ff_sum_done
-    movzx   eax, byte ptr [r11+rcx]
-    add     edx, eax
-    inc     ecx
-    jmp     ff_sum
-ff_sum_done:
-    lea     rcx, szInSum
-    call    emit_num
     mov     rcx, pInBuf
     mov     rax, [rcx]
     call    qword ptr [rax+32]             ; Unlock
@@ -2821,7 +3934,7 @@ ff_have_sample:
     call    qword ptr [rax+288]            ; SetSampleTime
     mov     rcx, pInSample
     mov     rax, [rcx]
-    mov     edx, 333333                    ; ~30 fps in 100 ns units
+    mov     edx, 166666                    ; ~60 fps in 100 ns units
     call    qword ptr [rax+304]            ; SetSampleDuration
 
     mov     rcx, pTransform
@@ -2901,20 +4014,9 @@ dr_have_sample:
     jnz     dr_release_contig
     mov     r11, qword ptr [bufPtr]
     mov     ecx, dword ptr [bufCur]
-    xor     r9d, r9d
-    xor     r8d, r8d
-dr_sum:
-    cmp     r8d, ecx
-    jae     dr_sum_done
-    movzx   eax, byte ptr [r11+r8]
-    add     r9d, eax
-    inc     r8d
-    jmp     dr_sum
-dr_sum_done:
     cmp     dword ptr [encFrames], 0
     jne     dr_not_first
     mov     firstSize, ecx
-    mov     firstSum, r9d
 dr_not_first:
     add     encBytes, ecx
     inc     encFrames
@@ -2929,10 +4031,11 @@ dr_release_contig:
     call    rel_if
     mov     qword ptr [pContig], 0
 dr_release_sample:
-    cmp     dword ptr [providesSamples], 0
-    jne     dr_done                        ; the MFT owns the samples it provides: never release them
     mov     rcx, r12
     call    rel_if
+    mov     rcx, qword ptr [odb+24]
+    call    rel_if
+    mov     qword ptr [odb+24], 0
 dr_done:
     add     rsp, 50h
     pop     r12
@@ -2956,6 +4059,7 @@ run_encoder_loop proc
     mov     dword ptr [firstSize], 0
     mov     dword ptr [firstSum], 0
     mov     qword ptr [hnsPts], 0
+    mov     qword ptr [qpcStart], 0
     mov     dword ptr [feedFails], 0
 
     mov     rcx, pTransform
@@ -3020,9 +4124,7 @@ el_gen_ok:
     jz      el_got_event
     cmp     eax, 0C00D3E80h                ; MF_E_NO_EVENTS_AVAILABLE
     jne     el_event_fail
-    mov     ecx, 1
-    call    Sleep
-    jmp     el_loop
+    jmp     el_done                        ; No events pending: exit immediately with zero sleep
 
 el_event_fail:
     mov     edx, eax
@@ -3051,21 +4153,38 @@ el_got_event:
     jmp     el_loop
 
 el_need_input:
-    lea     rcx, szE2                      ; trace: are we actually being asked for input?
-    mov     edx, 601
-    call    emit_num
-    mov     rcx, qword ptr [hnsPts]
+    cmp     qword ptr [qpcFreq], 0
+    jne     el_have_freq
+    lea     rcx, qpcFreq
+    call    QueryPerformanceFrequency
+el_have_freq:
+    lea     rcx, qpcNow
+    call    QueryPerformanceCounter
+    mov     rax, qword ptr [qpcNow]
+    cmp     qword ptr [qpcStart], 0
+    jne     el_have_start
+    mov     qword ptr [qpcStart], rax
+el_have_start:
+    sub     rax, qword ptr [qpcStart]
+    mov     r8, 1000000
+    mul     r8
+    mov     rcx, qword ptr [qpcFreq]
+    test    rcx, rcx
+    jz      el_pts_zero
+    div     rcx
+    imul    rax, 10
+    jmp     el_pts_store
+el_pts_zero:
+    xor     eax, eax
+el_pts_store:
+    mov     qword ptr [hnsPts], rax
+    mov     rcx, rax
     call    feed_nv12_frame
-    mov     eax, ptsStep
-    add     dword ptr [hnsPts], eax        ; the low dword is enough - carrying would take hours
     cmp     dword ptr [feedFails], 5       ; the MFT is rejecting everything: stop hammering it
     jae     el_done
     jmp     el_loop
 
 el_have_output:
-    lea     rcx, szE2                      ; trace: does the MFT ever hand us an encoded frame?
-    mov     edx, 602
-    call    emit_num
     call    drain_one_frame
     inc     dword ptr [pumpDrained]
     cmp     dword ptr [liveMode], 0
@@ -3119,6 +4238,8 @@ el_cleanup:
     mov     rcx, pEvent
     call    rel_if
     mov     qword ptr [pEvent], 0
+    cmp     dword ptr [liveMode], 0
+    jne     el_cleanup_done
     mov     rcx, pEventGen
     call    rel_if
     mov     qword ptr [pEventGen], 0
@@ -3128,6 +4249,7 @@ el_cleanup:
     mov     rcx, pInBuf
     call    rel_if
     mov     qword ptr [pInBuf], 0
+el_cleanup_done:
 
     add     rsp, 88h
     pop     r13
@@ -3135,8 +4257,8 @@ el_cleanup:
     ret
 run_encoder_loop endp
 
-; int mainCRTStartup(void)
-mainCRTStartup proc
+PUBLIC main
+main proc
     sub     rsp, 38h
 
     ; ---- env: LOCALAPPDATA ----
@@ -3155,6 +4277,9 @@ mainCRTStartup proc
     lea     rdx, szSub
     call    copy_z
     mov     r12, rax
+
+    ; resolve the bundled adb once, before any adb/pnputil call
+    call    resolve_adb_path
 
     lea     rcx, envBuf
     xor     edx, edx
@@ -3211,6 +4336,7 @@ mainCRTStartup proc
 
     ; ---- TCP handshake: listen, take one client, answer READY ----
 serve_again:
+    call    enable_vdd
     ; Marker: the crash follows a client abort, so the teardown steps are traced. The last one printed
     ; names the step that dies (the log's next "TCP listening" would mean everything above it survived).
     lea     rcx, szTd
@@ -3224,7 +4350,7 @@ serve_again:
 
     ; ---- live loop: one encoder, one long-lived capture, frames handed over as they arrive ----
     mov     dword ptr [liveMode], 1
-    mov     dword ptr [liveFrames], 20000
+    mov     dword ptr [liveFrames], 7FFFFFFFh
     mov     dword ptr [liveCount], 0
     mov     dword ptr [pumpCap], 12
     mov     dword ptr [ptsStep], 166667     ; the virtual display presents at 60 Hz
@@ -3235,6 +4361,9 @@ serve_again:
     lea     rcx, qpcFreq
     call    QueryPerformanceFrequency
     call    run_capture_probe
+
+    ; Session ended: disable VDD so phantom display disappears
+    call    disable_vdd
 
     ; ---- stage timings of the live loop (ticks -> ms) ----
     cmp     dword ptr [liveMode], 0
@@ -3259,6 +4388,6 @@ no_log:
 done:
     xor     ecx, ecx
     call    ExitProcess
-mainCRTStartup endp
+main endp
 
 end

@@ -6,42 +6,30 @@
 
 ## Что здесь лежит
 
-| Путь | Что это |
-|------|---------|
-| `host/` | Хост для Windows (.NET 8): `SecondDisplay.Host.exe` + зависимости |
-| `android/app-debug.apk` | Android-клиент (debug APK) |
+| Файл / Папка | Что это |
+|---|---|
+| `SecondDisplay-CSharp-Setup-1.0.0.exe` | Единый мультиязычный установщик хоста на **C# (.NET 8)** |
+| `SecondDisplay-HolyC-Setup-1.0.0.exe`  | Единый мультиязычный установщик хоста на **HolyC** |
+| `SecondDisplay-Asm-Setup-1.0.0.exe`    | Единый мультиязычный установщик хоста на **чистом Assembly (x64)** |
+| `SecondDisplay-Rust-Setup-1.0.0.exe`   | Единый мультиязычный установщик хоста на **Rust** |
+| `android/app-debug.apk`                | Android-клиент (debug APK) |
 
-## Как собрать
+## Как собрать установщики (Windows)
 
-```powershell
-# Хост
-dotnet publish "host\SecondDisplay.Host\SecondDisplay.Host.csproj" -c Release -o "releases\host"
-
-# Android-клиент (нужны JDK 17 + Android SDK; путь к SDK — в android\SecondDisplay\local.properties)
-# Проект без gradle-wrapper, поэтому собираем установленным Gradle или через Android Studio:
-gradle -p android\SecondDisplay :app:assembleDebug
-copy android\SecondDisplay\app\build\outputs\apk\debug\app-debug.apk releases\android\
-```
-
-## Как собрать установщик (Windows)
-
-Одна команда собирает хост, APK, кладёт `adb` и компилирует установщик в `releases/`:
+Сборка всех 4 установщиков (или конкретного):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Version 1.0.0
-# -> releases\SecondDisplay-Setup-1.0.0.exe       (мультиязычный: ru+en)
-# -> releases\SecondDisplay-Setup-1.0.0-ru.exe     (только русский)
-# -> releases\SecondDisplay-Setup-1.0.0-en.exe     (только английский)
+# Собрать все 4 установщика:
+powershell -ExecutionPolicy Bypass -File scripts\build-installers.ps1
+
+# Либо собрать конкретный движок хоста:
+powershell -ExecutionPolicy Bypass -File scripts\build-installers.ps1 -Target CSharp
+powershell -ExecutionPolicy Bypass -File scripts\build-installers.ps1 -Target HolyC
+powershell -ExecutionPolicy Bypass -File scripts\build-installers.ps1 -Target Asm
+powershell -ExecutionPolicy Bypass -File scripts\build-installers.ps1 -Target Rust
 ```
 
-Сборщик компилирует **по установщику на каждый язык** (Inno подстановки `/DLangRu` / `/DLangEn`;
-без них — один мультиязычный), все кладутся в `releases/`.
-
-Что делает `scripts\build-release.ps1`:
-1. `cargo build --release` Rust-хоста (`host-rs`) → `build\staging\host\SecondDisplay.Host.exe`;
-2. собирает Android-клиент (Gradle `:app:assembleDebug`) → `build\staging\android\app-debug.apk`;
-3. кладёт `adb.exe` + 2 DLL в `build\staging\platform-tools`;
-4. компилирует Inno Setup-скрипт `installer\SecondDisplay.iss` → `releases\SecondDisplay-Setup-<ver>*.exe`.
+Каждый установщик является **мультиязычным** (автоматически определяет системный язык Windows и предлагает выбор Русский / English), содержит встроенный сертификат драйвера VDD, Android APK и инструменты ADB.
 
 Требования: Rust toolchain, JDK 17 + Android SDK + Gradle, Inno Setup 6
 (`winget install JRSoftware.InnoSetup`). Пути ищутся автоматически; можно задать

@@ -25,7 +25,7 @@ if (-not $isAdmin) {
 
 try {
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
-    $hostProj = Join-Path $repoRoot 'host\SecondDisplay.Host\SecondDisplay.Host.csproj'
+    $hostProj = Join-Path $repoRoot 'host-c#\SecondDisplay.Host\SecondDisplay.Host.csproj'
 
     Write-Host "Stopping SecondDisplay.Host..."
     Get-Process SecondDisplay.Host -ErrorAction SilentlyContinue | Stop-Process -Force

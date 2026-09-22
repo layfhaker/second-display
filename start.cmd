@@ -2,13 +2,13 @@
 title SecondDisplay Host + ADB
 
 set PORT=27315
-set HOST_DIR=%~dp0host\SecondDisplay.Host\bin\Release\net8.0-windows
+set HOST_DIR=%~dp0host-c#\SecondDisplay.Host\bin\Release\net8.0-windows
 set HOST_EXE=%HOST_DIR%\SecondDisplay.Host.exe
 set HOST_ARGS=
 
 if not exist "%HOST_EXE%" (
     echo [!] Host not built. Building...
-    dotnet build "%~dp0host\SecondDisplay.Host\SecondDisplay.Host.csproj" -c Release
+    dotnet build "%~dp0host-c#\SecondDisplay.Host\SecondDisplay.Host.csproj" -c Release
     if errorlevel 1 (
         echo [ERROR] Build failed.
         pause

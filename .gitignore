@@ -20,12 +20,16 @@ releases/*
 *.log
 .build/
 tmp-build/
-host/build_out*/
+host-c#/build_out*/
 build_out*/
 
 # ---- Test captures / media ----
 *.h265
 *.apk
+
+# ---- Toolchain downloads / stray build objects ----
+android/platform-tools/
+test_subsystem.obj
 
 # ---- Local machine / secrets ----
 .env
